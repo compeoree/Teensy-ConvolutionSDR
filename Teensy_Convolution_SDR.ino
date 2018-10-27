@@ -22,20 +22,6 @@
    - tested on Teensy 3.6 (using its FPU)
    - compile with 180MHz F_CPU, other speeds not supported
 
-   TODO:
-   - implement separate interrupt to cope with UI (encoders, buttons, calculation of filter coefficients) in order to free audio interrupt
-   - SSB autotune algorithm taken from Robert Dick
-   - RTTY and CW decoder
-   - BPSK decoder
-   - UKW DX filters for WFM prior to FM demodulation (110kHz, 80kHz, 57kHz)
-   - test dBm measurement according to filter passband
-   - RDS decoding in wide FM reception mode ;-): very hard, but could be barely possible
-   - finetune AGC parameters and make AGC HANG TIME, AGC HANG THRESHOLD and AGC HANG DECAY user-adjustable
-   - record and playback IQ audio stream ;-)
-   - read stations´ frequencies from SD card and display station names when tuned to a frequency
-   - implement Motorola C-QUAM AM Stereo demodulation
-   - CW peak filter (independently adjustable from notch filter)
-
    some parts of the code modified from and/or inspired by the following open sources:
    Teensy SDR (rheslip & DD4WH): https://github.com/DD4WH/Teensy-SDR-Rx [GNU GPL]
    UHSDR (M0NKA, KA7OEI, DF8OE, DB4PLE, DL2FW, DD4WH & other contributors): https://github.com/df8oe/UHSDR [GNU GPL]
