@@ -81,6 +81,7 @@
 //#include "rtty.h"
 //#include "cw_decoder.h"
 
+#define VERBOSE_SERIAL
 #define QSD_TYPE JORIS // See QSD.h for available types
 QSD qsd;
 
@@ -1438,6 +1439,14 @@ void setup() {
   Serial.begin(115200);
   delay(100);
 
+#ifdef VERBOSE_SERIAL
+  Serial.println("Teensy Convolution SDR V0.1");
+#endif
+
+
+#ifdef VERBOSE_SERIAL
+  Serial.println("Setting Audio Memory to 170");
+#endif
   // all the comments on memory settings and MP3 playing are for FFT size of 1024 !
   // for the large queue sizes at 192ksps sample rate we need a lot of buffers
   //  AudioMemory(130);  // good for 176ksps sample rate, but MP3 playing is not possible
@@ -1448,9 +1457,16 @@ void setup() {
   //    AudioMemory(100);
   delay(100);
 
+
+#ifdef VERBOSE_SERIAL
+  Serial.println("Getting RTC time");
+#endif
   // get TIME from real time clock with 3V backup battery
   setSyncProvider(getTeensy3Time);
 
+#ifdef VERBOSE_SERIAL
+  Serial.println("Init SD card");
+#endif
   // initialize SD card slot
   if (!(SD.begin(BUILTIN_SDCARD))) {
     // stop here, but print a message repetitively
@@ -1459,6 +1475,10 @@ void setup() {
       delay(500);
     }
   }
+  
+#ifdef VERBOSE_SERIAL
+  Serial.println("Parsing SD filesystem");
+#endif
   //Starting to index the SD card for MP3/AAC.
   root = SD.open("/");
 
@@ -1474,6 +1494,9 @@ void setup() {
       break;
     }
     String curfile = files.name(); //put file in string
+#ifdef VERBOSE_SERIAL
+  Serial.println("Found file " + curfile);
+#endif
     //look for MP3 or AAC files
     int m = curfile.lastIndexOf(".MP3");
     int a = curfile.lastIndexOf(".AAC");
@@ -1508,8 +1531,15 @@ void setup() {
   /****************************************************************************************
       load saved settings from EEPROM
    ****************************************************************************************/
-  // if loading the software for the very first time, comment out the "EEPROM_LOAD" --> then save settings in the menu --> load software with EEPROM_LOAD uncommented
+#ifdef VERBOSE_SERIAL
+  Serial.println("Loading settings from EEPROM");
+#endif
+// if loading the software for the very first time, comment out the "EEPROM_LOAD" --> then save settings in the menu --> load software with EEPROM_LOAD uncommented
   EEPROM_LOAD();
+
+#ifdef VERBOSE_SERIAL
+  Serial.println("Init ADC (SGTL5000)");
+#endif
   // Enable the audio shield. select input. and enable output
   sgtl5000_1.enable();
   sgtl5000_1.inputSelect(myInput);
@@ -1529,11 +1559,18 @@ void setup() {
   mixright.gain(0, 1.0);
   sgtl5000_1.volume((float32_t)audio_volume / 100.0); //
 
+#ifdef VERBOSE_SERIAL
+  Serial.println("Init backlight");
+#endif
   pinMode(BACKLIGHT_PIN, OUTPUT );
   //  analogWriteFrequency(BACKLIGHT_PIN, 234375); // change PWM speed in order to prevent disturbance in the audio path
   //  analogWriteResolution(8); // set resolution to 8 bit: well, that´s overkill for backlight, 4 bit would be enough :-)
   // severe disturbance occurs (in the audio loudspeaker amp!) with the standard speed of 488.28Hz, which is well in the audible audio range
   analogWrite(BACKLIGHT_PIN, spectrum_brightness); // 0: dark, 255: bright
+
+#ifdef VERBOSE_SERIAL
+  Serial.println("Init buttons");
+#endif
   pinMode(BUTTON_1_PIN, INPUT_PULLUP);
   pinMode(BUTTON_2_PIN, INPUT_PULLUP);
   pinMode(BUTTON_3_PIN, INPUT_PULLUP);
@@ -1542,13 +1579,24 @@ void setup() {
   pinMode(BUTTON_6_PIN, INPUT_PULLUP);
   pinMode(BUTTON_7_PIN, INPUT_PULLUP);
   pinMode(BUTTON_8_PIN, INPUT_PULLUP);
+  
+#ifdef VERBOSE_SERIAL
+  Serial.println("Init QSD");
+#endif
   qsd.initQSD();
+
+#ifdef VERBOSE_SERIAL
+  Serial.println("Init attenuator");
+#endif
   pinMode(ATT_LE, OUTPUT);
   pinMode(ATT_CLOCK, OUTPUT);
   pinMode(ATT_DATA, OUTPUT);
   //  pinMode(AUDIO_AMP_ENABLE, OUTPUT);
   //  digitalWrite(AUDIO_AMP_ENABLE, HIGH);
 
+#ifdef VERBOSE_SERIAL
+  Serial.println("Init display");
+#endif
   tft.begin();
   tft.setRotation( 3 );
   tft.fillScreen(ILI9341_BLACK);
