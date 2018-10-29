@@ -1865,8 +1865,6 @@ void setup() {
      start local oscillator Si5351
   ****************************************************************************************/
   setAttenuator(RF_attenuation);
-  qsd.si5351.init(SI5351_CRYSTAL_LOAD_10PF, Si_5351_crystal, qsd.calibration_constant);
-  qsd.setfreq();
   FrequencyBarText();
   delay(100);
   show_frequency(qsd.bands[qsd.band].freq, 1);
