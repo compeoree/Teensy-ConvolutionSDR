@@ -58,7 +58,6 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>
 
  ************************************************************************************************************************************/
-
 #include <Audio.h>
 #include <Time.h>
 #include <TimeLib.h>
@@ -70,41 +69,30 @@
 #include <ILI9341_t3.h>
 #include <arm_math.h>
 #include <arm_const_structs.h>
-#include <si5351.h>
 #include <Encoder.h>
 #include <EEPROM.h>
 #include <Bounce.h>
 #include <play_sd_mp3.h> //mp3 decoder by Frank B
 #include <play_sd_aac.h> // AAC decoder by Frank B
+#include "ADC.h"
+#include "QSD.h"
+#include "Demod.h"
+#include "Tuner.h"
 //#include "rtty.h"
 //#include "cw_decoder.h"
 
+#define QSD_TYPE JORIS // See QSD.h for available types
+QSD qsd;
 
 time_t getTeensy3Time()
 {
   return Teensy3Clock.get();
 }
 
-// Settings for the hardware QSD
-// Joris PCB uses a 27MHz crystal and CLOCK 2 output
-// Elektor SDR PCB uses a 25MHz crystal and the CLOCK 1 output
-//#define Si_5351_clock  SI5351_CLK1
-//#define Si_5351_crystal 25000000
-#define Si_5351_clock  SI5351_CLK2
-#define Si_5351_crystal 27000000
-
-unsigned long long calibration_factor = 1000000000 ;// 10002285;
-long calibration_constant = -8000; // this is for the Joris PCB !
-//long calibration_constant = 108000; // this is for the Elektor PCB !
-unsigned long long hilfsf;
-
 // Optical Encoder connections
 Encoder tune      (16, 17);
 Encoder filter    (1, 2);
 Encoder encoder3  (5, 4); //(26, 28);
-
-Si5351 si5351;
-#define MASTER_CLK_MULT  4  // QSD frontend requires 4x clock
 
 #define BACKLIGHT_PIN   3
 #define TFT_DC          20
@@ -149,11 +137,6 @@ Metro ms_500 = Metro(500); // Set up a Metro
 Metro encoder_check = Metro(100); // Set up a Metro
 //Metro dbm_check = Metro(25);
 uint8_t wait_flag = 0;
-const uint8_t Band1 = 31; // band selection pins for LPF relays, used with 2N7000: HIGH means LPF is activated
-const uint8_t Band2 = 30; // always use only one LPF with HIGH, all others have to be LOW
-const uint8_t Band3 = 27;
-const uint8_t Band4 = 29; // 29: > 5.4MHz
-const uint8_t Band5 = 26; // LW
 
 // this audio comes from the codec by I2S2
 AudioInputI2S            i2s_in;
@@ -228,53 +211,8 @@ int32_t spectrum_zoom = SPECTRUM_ZOOM_2;
 
 // Text and position for the FFT spectrum display scale
 
-#define SAMPLE_RATE_MIN               6
-#define SAMPLE_RATE_8K                0
-#define SAMPLE_RATE_11K               1
-#define SAMPLE_RATE_16K               2
-#define SAMPLE_RATE_22K               3
-#define SAMPLE_RATE_32K               4
-#define SAMPLE_RATE_44K               5
-#define SAMPLE_RATE_48K               6
-#define SAMPLE_RATE_88K               7
-#define SAMPLE_RATE_96K               8
-#define SAMPLE_RATE_100K              9
-#define SAMPLE_RATE_176K              10
-#define SAMPLE_RATE_192K              11
-#define SAMPLE_RATE_MAX               11
 
-//uint8_t sr =                     SAMPLE_RATE_96K;
-uint8_t SAMPLE_RATE =            SAMPLE_RATE_96K;
 
-typedef struct SR_Descriptor
-{
-  const uint8_t SR_n;
-  const uint32_t rate;
-  const char* const text;
-  const char* const f1;
-  const char* const f2;
-  const char* const f3;
-  const char* const f4;
-  const float32_t x_factor;
-  const uint8_t x_offset;
-} SR_Desc;
-const SR_Descriptor SR [12] =
-{
-  //   SR_n , rate, text, f1, f2, f3, f4, x_factor = pixels per f1 kHz in spectrum display
-  {  SAMPLE_RATE_8K, 8000,  "  8k", " 1", " 2", " 3", " 4", 64.0, 11}, // not OK
-  {  SAMPLE_RATE_11K, 11025, " 11k", " 1", " 2", " 3", " 4", 43.1, 17}, // not OK
-  {  SAMPLE_RATE_16K, 16000, " 16k",  " 4", " 4", " 8", "12", 64.0, 1}, // OK
-  {  SAMPLE_RATE_22K, 22050, " 22k",  " 5", " 5", "10", "15", 58.05, 6}, // OK
-  {  SAMPLE_RATE_32K, 32000,  " 32k", " 5", " 5", "10", "15", 40.0, 24}, // OK, one more indicator?
-  {  SAMPLE_RATE_44K, 44100,  " 44k", "10", "10", "20", "30", 58.05, 6}, // OK
-  {  SAMPLE_RATE_48K, 48000,  " 48k", "10", "10", "20", "30", 53.33, 11}, // OK
-  {  SAMPLE_RATE_88K, 88200,  " 88k", "20", "20", "40", "60", 58.05, 6}, // OK
-  {  SAMPLE_RATE_96K, 96000,  " 96k", "20", "20", "40", "60", 53.33, 12}, // OK
-  {  SAMPLE_RATE_100K, 100000,  "100k", "20", "20", "40", "60", 53.33, 12}, // NOT OK
-  {  SAMPLE_RATE_176K, 176400,  "176k", "40", "40", "80", "120", 58.05, 6}, // OK
-  {  SAMPLE_RATE_192K, 192000,  "192k", "40", "40", "80", "120", 53.33, 12} // not OK
-};
-int32_t IF_FREQ = SR[SAMPLE_RATE].rate / 4;     // IF (intermediate) frequency
 #define F_MAX 3700000000
 #define F_MIN 1200000
 
@@ -580,7 +518,7 @@ int pos_y_frequency = 48; //52 //61  //119
 #define notchColour ILI9341_YELLOW
 int pos_centre_f = 64; //
 int oldnotchF = 10000;
-float32_t bin_BW = 1.0 / (DF * FFT_length) * SR[SAMPLE_RATE].rate;
+float32_t bin_BW = 1.0 / (DF * FFT_length) * qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate;
 // 1/8192 = 0,0001220703125
 float32_t bin = 2000.0 / bin_BW;
 float32_t notches[10] = {500.0, 1000.0, 1500.0, 2000.0, 2500.0, 3000.0, 3500.0, 4000.0, 4500.0, 5000.0};
@@ -619,90 +557,8 @@ int16_t pos_y_dbm = pos_y_smeter - 7;
 uint8_t display_dbm = DISPLAY_S_METER_DBM;
 uint8_t dbm_state = 0;
 
-// out of the nine implemented AM detectors, only
-// two proved to be of acceptable quality:
-// AM2 and AM_ME2
-// however, SAM outperforms all demodulators ;-)
-#define       DEMOD_MIN           0
-#define       DEMOD_USB           0
-#define       DEMOD_LSB           1
-//#define       DEMOD_AM1           2
-#define       DEMOD_AM2           2
-//#define       DEMOD_AM3           4
-//#define       DEMOD_AM_AE1        5
-//#define       DEMOD_AM_AE2        6
-//#define       DEMOD_AM_AE3        7
-//#define       DEMOD_AM_ME1        8
-#define       DEMOD_AM_ME2        26
-//#define       DEMOD_AM_ME3       10
-#define       DEMOD_SAM          3 // synchronous AM demodulation
-#define       DEMOD_SAM_USB      27 // synchronous AM demodulation
-#define       DEMOD_SAM_LSB      28 // synchronous AM demodulation
-#define       DEMOD_SAM_STEREO   4 // SAM, with pseude-stereo effect
-#define       DEMOD_IQ           5
-#define       DEMOD_WFM          6
-#define       DEMOD_DCF77        29 // set the clock with the time signal station DCF77
-#define       DEMOD_AUTOTUNE     10 // AM demodulation with autotune function
-#define       DEMOD_STEREO_DSB   17 // double sideband: SSB without eliminating the opposite sideband
-#define       DEMOD_DSB          18 // double sideband: SSB without eliminating the opposite sideband
-#define       DEMOD_STEREO_LSB   19
-#define       DEMOD_AM_USB       20 // AM demodulation with lower sideband suppressed
-#define       DEMOD_AM_LSB       21 // AM demodulation with upper sideband suppressed
-#define       DEMOD_STEREO_USB   22
-#define       DEMOD_MAX          6
-#define BAND_LW     0
-#define BAND_MW     1
-#define BAND_120M   2
-#define BAND_90M    3
-#define BAND_75M    4
-#define BAND_60M    5
-#define BAND_49M    6
-#define BAND_41M    7
-#define BAND_31M    8
-#define BAND_25M    9
-#define BAND_22M   10
-#define BAND_19M   11
-#define BAND_16M   12
-#define BAND_15M   13
-#define BAND_13M   14
-#define BAND_11M   15
-
-#define FIRST_BAND BAND_LW
-#define LAST_BAND  BAND_13M
-#define NUM_BANDS  16
-#define STARTUP_BAND BAND_MW    // 
-
 uint8_t autotune_wait = 10;
 
-struct band {
-  unsigned long long freq; // frequency in Hz
-  String name; // name of band
-  int mode;
-  int FHiCut;
-  int FLoCut;
-  int RFgain;
-};
-// f, band, mode, bandwidth, RFgain
-struct band bands[NUM_BANDS] = {
-  //  7750000 ,"VLF", DEMOD_AM, 3600,3600,0,
-  22500000, "LW", DEMOD_SAM, 3600, -3600, 0,
-  63900000, "MW",  DEMOD_SAM, 3600, -3600, 0,
-  248500000, "120M",  DEMOD_SAM, 3600, -3600, 0,
-  350000000, "90M",  DEMOD_LSB, 3600, -3600, 6,
-  390500000, "75M",  DEMOD_SAM, 3600, -3600, 4,
-  502500000, "60M",  DEMOD_SAM, 3600, -3600, 7,
-  593200000, "49M",  DEMOD_SAM, 3600, -3600, 0,
-  712000000, "41M",  DEMOD_SAM, 3600, -3600, 0,
-  942000000, "31M",  DEMOD_SAM, 3600, -3600, 0,
-  1173500000, "25M", DEMOD_SAM, 3600, -3600, 2,
-  1357000000, "22M", DEMOD_SAM, 3600, -3600, 2,
-  1514000000, "19M", DEMOD_SAM, 3600, -3600, 4,
-  1748000000, "16M", DEMOD_SAM, 3600, -3600, 5,
-  3146866600, "15M", DEMOD_WFM, 3600, -3600, 21,
-  2145000000, "13M", DEMOD_SAM, 3600, -3600, 6,
-  2567000000, "11M", DEMOD_SAM, 3600, -3600, 6
-};
-int band = STARTUP_BAND;
 
 #define TUNE_STEP_MIN   0
 #define TUNE_STEP1   0    // shortwave
@@ -715,7 +571,6 @@ int band = STARTUP_BAND;
 uint8_t tune_stepper = 0;
 int tunestep = 5000; //TUNE_STEP1;
 String tune_text = "Fast Tune";
-uint8_t autotune_flag = 0;
 int old_demod_mode = -99;
 
 int8_t first_block = 1;
@@ -995,10 +850,10 @@ float32_t zeta = (float32_t)zeta_help / 100.0; // PLL step response: smaller, sl
 float32_t omegaN = 200.0; // PLL bandwidth 50.0 - 1000.0
 
 //pll
-float32_t omega_min = TPI * - pll_fmax * DF / SR[SAMPLE_RATE].rate;
-float32_t omega_max = TPI * pll_fmax * DF / SR[SAMPLE_RATE].rate;
-float32_t g1 = 1.0 - exp(-2.0 * omegaN * zeta * DF / SR[SAMPLE_RATE].rate);
-float32_t g2 = - g1 + 2.0 * (1 - exp(- omegaN * zeta * DF / SR[SAMPLE_RATE].rate) * cosf(omegaN * DF / SR[SAMPLE_RATE].rate * sqrtf(1.0 - zeta * zeta)));
+float32_t omega_min = TPI * - pll_fmax * DF / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate;
+float32_t omega_max = TPI * pll_fmax * DF / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate;
+float32_t g1 = 1.0 - exp(-2.0 * omegaN * zeta * DF / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
+float32_t g2 = - g1 + 2.0 * (1 - exp(- omegaN * zeta * DF / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate) * cosf(omegaN * DF / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate * sqrtf(1.0 - zeta * zeta)));
 float32_t phzerror = 0.0;
 float32_t det = 0.0;
 float32_t fil_out = 0.0;
@@ -1012,9 +867,9 @@ float32_t dc = 0.0;
 float32_t dc_insert = 0.0;
 float32_t dcu = 0.0;
 float32_t dc_insertu = 0.0;
-float32_t mtauR = exp(- DF / (SR[SAMPLE_RATE].rate * tauR));
+float32_t mtauR = exp(- DF / (qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate * tauR));
 float32_t onem_mtauR = 1.0 - mtauR;
-float32_t mtauI = exp(- DF / (SR[SAMPLE_RATE].rate * tauI));
+float32_t mtauI = exp(- DF / (qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate * tauI));
 float32_t onem_mtauI = 1.0 - mtauI;
 uint8_t fade_leveler = 1;
 uint8_t WDSP_SAM = 1;
@@ -1659,7 +1514,7 @@ void setup() {
   sgtl5000_1.enable();
   sgtl5000_1.inputSelect(myInput);
   sgtl5000_1.adcHighPassFilterDisable(); // does not help too much!
-  sgtl5000_1.lineInLevel(bands[band].RFgain);
+  sgtl5000_1.lineInLevel(qsd.bands[qsd.band].RFgain);
   //  sgtl5000_1.lineOutLevel(31);
   sgtl5000_1.lineOutLevel(24);
 
@@ -1687,11 +1542,7 @@ void setup() {
   pinMode(BUTTON_6_PIN, INPUT_PULLUP);
   pinMode(BUTTON_7_PIN, INPUT_PULLUP);
   pinMode(BUTTON_8_PIN, INPUT_PULLUP);
-  pinMode(Band1, OUTPUT);  // LPF switches
-  pinMode(Band2, OUTPUT);  //
-  pinMode(Band3, OUTPUT);  //
-  pinMode(Band4, OUTPUT);  //
-  pinMode(Band5, OUTPUT);  //
+  qsd.initQSD();
   pinMode(ATT_LE, OUTPUT);
   pinMode(ATT_CLOCK, OUTPUT);
   pinMode(ATT_DATA, OUTPUT);
@@ -1713,11 +1564,11 @@ void setup() {
   /****************************************************************************************
      set filter bandwidth
   ****************************************************************************************/
-  setup_mode(bands[band].mode);
+  setup_mode(qsd.bands[qsd.band].mode);
 
   // this routine does all the magic of calculating the FIR coeffs (Bessel-Kaiser window)
   //    calc_FIR_coeffs (FIR_Coef, 513, (float32_t)LP_F_help, LP_Astop, 0, 0.0, (float)SR[SAMPLE_RATE].rate / DF);
-  calc_cplx_FIR_coeffs (FIR_Coef_I, FIR_Coef_Q, m_NumTaps, (float32_t)bands[band].FLoCut, (float32_t)bands[band].FHiCut, (float)SR[SAMPLE_RATE].rate / DF);
+  calc_cplx_FIR_coeffs (FIR_Coef_I, FIR_Coef_Q, m_NumTaps, (float32_t)qsd.bands[qsd.band].FLoCut, (float32_t)qsd.bands[qsd.band].FHiCut, (float)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / DF);
   //    m_NumTaps = 513;
   //    N_BLOCKS = FFT_length / 2 / BUFFER_SIZE;
 
@@ -1770,9 +1621,9 @@ void setup() {
   /****************************************************************************************
      Set sample rate
   ****************************************************************************************/
-  setI2SFreq (SR[SAMPLE_RATE].rate);
+  setI2SFreq (qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
   delay(200); // essential ?
-  IF_FREQ = SR[SAMPLE_RATE].rate / 4;
+  qsd.audioADC.IF_FREQ = qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / 4;
 
   biquad_lowpass1.numStages = N_stages_biquad_lowpass1; // set number of stages
   biquad_lowpass1.pCoeffs = biquad_lowpass1_coeffs; // set pointer to coefficients file
@@ -1819,9 +1670,9 @@ void setup() {
   ****************************************************************************************/
   // also adjust IIR AM filter
   // calculate IIR coeffs
-  LP_F_help = bands[band].FHiCut;
-  if (LP_F_help < - bands[band].FLoCut) LP_F_help = - bands[band].FLoCut;
-  set_IIR_coeffs ((float32_t)LP_F_help, 1.3, (float32_t)SR[SAMPLE_RATE].rate / DF, 0); // 1st stage
+  LP_F_help = qsd.bands[qsd.band].FHiCut;
+  if (LP_F_help < - qsd.bands[qsd.band].FLoCut) LP_F_help = - qsd.bands[qsd.band].FLoCut;
+  set_IIR_coeffs ((float32_t)LP_F_help, 1.3, (float32_t)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / DF, 0); // 1st stage
   for (i = 0; i < 5; i++)
   { // fill coefficients into the right file
     biquad_lowpass1_coeffs[i] = coefficient_set[i];
@@ -1867,7 +1718,7 @@ void setup() {
 
   // Decimation filter 1, M1 = DF1
   //    calc_FIR_coeffs (FIR_dec1_coeffs, 25, (float32_t)5100.0, 80, 0, 0.0, (float32_t)SR[SAMPLE_RATE].rate);
-  calc_FIR_coeffs (FIR_dec1_coeffs, n_dec1_taps, (float32_t)(n_desired_BW * 1000.0), n_att, 0, 0.0, (float32_t)SR[SAMPLE_RATE].rate);
+  calc_FIR_coeffs (FIR_dec1_coeffs, n_dec1_taps, (float32_t)(n_desired_BW * 1000.0), n_att, 0, 0.0, (float32_t)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
   if (arm_fir_decimate_init_f32(&FIR_dec1_I, n_dec1_taps, (uint32_t)DF1 , FIR_dec1_coeffs, FIR_dec1_I_state, BUFFER_SIZE * N_BLOCKS)) {
     Serial.println("Init of decimation failed");
     while (1);
@@ -1878,7 +1729,7 @@ void setup() {
   }
 
   // Decimation filter 2, M2 = DF2
-  calc_FIR_coeffs (FIR_dec2_coeffs, n_dec2_taps, (float32_t)(n_desired_BW * 1000.0), n_att, 0, 0.0, (float32_t)(SR[SAMPLE_RATE].rate / DF1));
+  calc_FIR_coeffs (FIR_dec2_coeffs, n_dec2_taps, (float32_t)(n_desired_BW * 1000.0), n_att, 0, 0.0, (float32_t)(qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / DF1));
   if (arm_fir_decimate_init_f32(&FIR_dec2_I, n_dec2_taps, (uint32_t)DF2, FIR_dec2_coeffs, FIR_dec2_I_state, BUFFER_SIZE * N_BLOCKS / (uint32_t)DF1)) {
     Serial.println("Init of decimation failed");
     while (1);
@@ -1893,7 +1744,7 @@ void setup() {
   // yes, because the interpolation filter is AFTER the upsampling, so it has to be in the target sample rate!
   //    calc_FIR_coeffs (FIR_int1_coeffs, 8, (float32_t)5000.0, 80, 0, 0.0, 12000);
   //    calc_FIR_coeffs (FIR_int1_coeffs, 16, (float32_t)(n_desired_BW * 1000.0), n_att, 0, 0.0, SR[SAMPLE_RATE].rate / 4.0);
-  calc_FIR_coeffs (FIR_int1_coeffs, 48, (float32_t)(n_desired_BW * 1000.0), n_att, 0, 0.0, SR[SAMPLE_RATE].rate / 4.0);
+  calc_FIR_coeffs (FIR_int1_coeffs, 48, (float32_t)(n_desired_BW * 1000.0), n_att, 0, 0.0, qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / 4.0);
   //    if(arm_fir_interpolate_init_f32(&FIR_int1_I, (uint32_t)DF2, 16, FIR_int1_coeffs, FIR_int1_I_state, BUFFER_SIZE * N_BLOCKS / (uint32_t)DF)) {
   if (arm_fir_interpolate_init_f32(&FIR_int1_I, (uint8_t)DF2, 48, FIR_int1_coeffs, FIR_int1_I_state, BUFFER_SIZE * N_BLOCKS / (uint32_t)DF)) {
     Serial.println("Init of interpolation failed");
@@ -1910,7 +1761,7 @@ void setup() {
   // yes, because the interpolation filter is AFTER the upsampling, so it has to be in the target sample rate!
   //    calc_FIR_coeffs (FIR_int2_coeffs, 4, (float32_t)5000.0, 80, 0, 0.0, 24000);
   //    calc_FIR_coeffs (FIR_int2_coeffs, 16, (float32_t)(n_desired_BW * 1000.0), n_att, 0, 0.0, (float32_t)SR[SAMPLE_RATE].rate);
-  calc_FIR_coeffs (FIR_int2_coeffs, 32, (float32_t)(n_desired_BW * 1000.0), n_att, 0, 0.0, (float32_t)SR[SAMPLE_RATE].rate);
+  calc_FIR_coeffs (FIR_int2_coeffs, 32, (float32_t)(n_desired_BW * 1000.0), n_att, 0, 0.0, (float32_t)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
 
   //    if(arm_fir_interpolate_init_f32(&FIR_int2_I, (uint32_t)DF1, 16, FIR_int2_coeffs, FIR_int2_I_state, BUFFER_SIZE * N_BLOCKS / (uint32_t)DF1)) {
   if (arm_fir_interpolate_init_f32(&FIR_int2_I, (uint8_t)DF1, 32, FIR_int2_coeffs, FIR_int2_I_state, BUFFER_SIZE * N_BLOCKS / (uint32_t)DF1)) {
@@ -1956,8 +1807,8 @@ void setup() {
   /****************************************************************************************
      Zoom FFT: Initiate decimation and interpolation FIR filters AND IIR filters
   ****************************************************************************************/
-  float32_t Fstop_Zoom = 0.5 * (float32_t) SR[SAMPLE_RATE].rate / (1 << spectrum_zoom);
-  calc_FIR_coeffs (Fir_Zoom_FFT_Decimate_coeffs, 4, Fstop_Zoom, 60, 0, 0.0, (float32_t)SR[SAMPLE_RATE].rate);
+  float32_t Fstop_Zoom = 0.5 * (float32_t) qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / (1 << spectrum_zoom);
+  calc_FIR_coeffs (Fir_Zoom_FFT_Decimate_coeffs, 4, Fstop_Zoom, 60, 0, 0.0, (float32_t)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
   // Attention: max decimation rate is 128 !
 //  if (arm_fir_decimate_init_f32(&Fir_Zoom_FFT_Decimate_I, 4, 1 << spectrum_zoom, Fir_Zoom_FFT_Decimate_coeffs, Fir_Zoom_FFT_Decimate_I_state, BUFFER_SIZE * N_BLOCKS)) {
   if (arm_fir_decimate_init_f32(&Fir_Zoom_FFT_Decimate_I, 4, 128, Fir_Zoom_FFT_Decimate_coeffs, Fir_Zoom_FFT_Decimate_I_state, BUFFER_SIZE * N_BLOCKS)) {
@@ -2014,10 +1865,11 @@ void setup() {
      start local oscillator Si5351
   ****************************************************************************************/
   setAttenuator(RF_attenuation);
-  si5351.init(SI5351_CRYSTAL_LOAD_10PF, Si_5351_crystal, calibration_constant);
-  setfreq();
+  qsd.si5351.init(SI5351_CRYSTAL_LOAD_10PF, Si_5351_crystal, qsd.calibration_constant);
+  qsd.setfreq();
+  FrequencyBarText();
   delay(100);
-  show_frequency(bands[band].freq, 1);
+  show_frequency(qsd.bands[qsd.band].freq, 1);
 
   /****************************************************************************************
       Initialize spectral noise reduction variables
@@ -2052,7 +1904,7 @@ void loop() {
   //
 
   // WIDE FM BROADCAST RECEPTION
-  if (bands[band].mode == DEMOD_WFM)
+  if (qsd.bands[qsd.band].mode == DEMOD_WFM)
   {
     if (Q_in_L.available() > 12 && Q_in_R.available() > 12 && Menu_pointer != MENU_PLAYER)
     {
@@ -2383,9 +2235,9 @@ void loop() {
         tft.setTextColor(ILI9341_GREEN);
         tft.setFont(Arial_9);
         mean = sum / idx_t;
-        if (mean / 29.00 * SR[SAMPLE_RATE].rate / AUDIO_SAMPLE_RATE_EXACT / WFM_BLOCKS < 100.0)
+        if (mean / 29.00 * qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / AUDIO_SAMPLE_RATE_EXACT / WFM_BLOCKS < 100.0)
         {
-          tft.print (mean / 29.00 * SR[SAMPLE_RATE].rate / AUDIO_SAMPLE_RATE_EXACT / WFM_BLOCKS);
+          tft.print (mean / 29.00 * qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / AUDIO_SAMPLE_RATE_EXACT / WFM_BLOCKS);
           tft.print("%");
         }
         else
@@ -3144,7 +2996,7 @@ void loop() {
       arm_cfft_f32(S, FFT_buffer, 0, 1);
 
       // AUTOTUNE, slow down process in order for Si5351 to settle
-      if (autotune_flag != 0)
+      if (qsd.tuner.autotune_flag != 0)
       {
         if (autotune_counter < autotune_wait) autotune_counter++;
         else
@@ -3229,7 +3081,7 @@ void loop() {
       // choice of FFT_bins for "demodulation" WITHOUT frequency translation
       // (because frequency translation has already been done in time domain with
       // "frequency translation without multiplication" - DSP trick R. Lyons (2011))
-      switch (band[bands].mode)
+      switch (qsd.band[qsd.bands].mode)
       {
         //      case DEMOD_AM1:
         case DEMOD_AUTOTUNE:
@@ -3408,7 +3260,7 @@ void loop() {
       // which one and how they are combined is dependent upon the demod_mode . . .
 
 
-      if (band[bands].mode == DEMOD_SAM || band[bands].mode == DEMOD_SAM_LSB || band[bands].mode == DEMOD_SAM_USB || band[bands].mode == DEMOD_SAM_STEREO)
+      if (qsd.band[qsd.bands].mode == DEMOD_SAM || qsd.band[qsd.bands].mode == DEMOD_SAM_LSB || qsd.band[qsd.bands].mode == DEMOD_SAM_USB || qsd.band[qsd.bands].mode == DEMOD_SAM_STEREO)
       { // taken from Warren Pratt´s WDSP, 2016
         // http://svn.tapr.org/repos_sdr_hpsdr/trunk/W5WC/PowerSDR_HPSDR_mRX_PS/Source/wdsp/
 
@@ -3422,7 +3274,7 @@ void loop() {
           aq = Cos * iFFT_buffer[FFT_length + i * 2 + 1];
           bq = Sin * iFFT_buffer[FFT_length + i * 2 + 1];
 
-          if (band[bands].mode != DEMOD_SAM)
+          if (qsd.band[qsd.bands].mode != DEMOD_SAM)
           {
             a[0] = dsI;
             b[0] = bi;
@@ -3456,7 +3308,7 @@ void loop() {
           corr[0] = +ai + bq;
           corr[1] = -bi + aq;
 
-          switch (band[bands].mode)
+          switch (qsd.band[qsd.bands].mode)
           {
             case DEMOD_SAM:
               {
@@ -3487,7 +3339,7 @@ void loop() {
             audio = audio + dc_insert - dc;
           }
           float_buffer_L[i] = audio;
-          if (band[bands].mode == DEMOD_SAM_STEREO)
+          if (qsd.band[qsd.bands].mode == DEMOD_SAM_STEREO)
           {
             if (fade_leveler)
             {
@@ -3515,7 +3367,7 @@ void loop() {
           while (phzerror >= TPI) phzerror -= TPI;
           while (phzerror < 0.0) phzerror += TPI;
         }
-        if (band[bands].mode != DEMOD_SAM_STEREO)
+        if (qsd.band[qsd.bands].mode != DEMOD_SAM_STEREO)
         {
           arm_copy_f32(float_buffer_L, float_buffer_R, FFT_length / 2);
         }
@@ -3526,15 +3378,15 @@ void loop() {
         // we calculate carrier offset here and the display function is
         // then called in main loop every 100ms
         { // to make this smoother, a simple lowpass/exponential averager here . . .
-          SAM_carrier = 0.08 * (omega2 * SR[SAMPLE_RATE].rate) / (DF * TPI);
+          SAM_carrier = 0.08 * (omega2 * qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate) / (DF * TPI);
           SAM_carrier = SAM_carrier + 0.92 * SAM_lowpass;
           SAM_carrier_freq_offset =  (int)SAM_carrier;
           //            SAM_display_count = 0;
           SAM_lowpass = SAM_carrier;
-          show_frequency(bands[band].freq, 0);
+          show_frequency(qsd.bands[qsd.band].freq, 0);
         }
       }
-      else if (band[bands].mode == DEMOD_IQ)
+      else if (qsd.band[qsd.bands].mode == DEMOD_IQ)
       {
         for (i = 0; i < FFT_length / 2; i++)
         {
@@ -3556,7 +3408,7 @@ void loop() {
                 arm_copy_f32(float_buffer_R, float_buffer_L, FFT_length/2);
               }
               else */
-        if (band[bands].mode == DEMOD_AM2)
+        if (qsd.band[qsd.bands].mode == DEMOD_AM2)
         { // // E(t) = sqrtf(I*I + Q*Q) --> highpass IIR 1st order for DC removal --> lowpass IIR 2nd order
           for (i = 0; i < FFT_length / 2; i++)
           { //
@@ -3643,7 +3495,7 @@ void loop() {
                   arm_copy_f32(float_buffer_R, float_buffer_L, FFT_length/2);
                 }
                 else */
-          if (band[bands].mode == DEMOD_AM_ME2)
+          if (qsd.band[qsd.bands].mode == DEMOD_AM_ME2)
           { // E(n) = alpha * max [I, Q] + beta * min [I, Q] --> highpass 1st order DC removal --> lowpass 2nd order IIR
             // Magnitude estimation Lyons (2011): page 652 / libcsdr
             for (i = 0; i < FFT_length / 2; i++)
@@ -3674,13 +3526,13 @@ void loop() {
                   else */
             for (i = 0; i < FFT_length / 2; i++)
             {
-              if (band[bands].mode == DEMOD_USB || band[bands].mode == DEMOD_LSB || band[bands].mode == DEMOD_DCF77 || band[bands].mode == DEMOD_AUTOTUNE)
+              if (qsd.band[qsd.bands].mode == DEMOD_USB || qsd.band[qsd.bands].mode == DEMOD_LSB || qsd.band[qsd.bands].mode == DEMOD_DCF77 || qsd.band[qsd.bands].mode == DEMOD_AUTOTUNE)
               {
                 float_buffer_L[i] = iFFT_buffer[FFT_length + (i * 2)];
                 // for SSB copy real part in both outputs
                 float_buffer_R[i] = float_buffer_L[i];
               }
-              else if (band[bands].mode == DEMOD_STEREO_LSB || band[bands].mode == DEMOD_STEREO_USB) // creates a pseudo-stereo effect
+              else if (qsd.band[qsd.bands].mode == DEMOD_STEREO_LSB || qsd.band[qsd.bands].mode == DEMOD_STEREO_USB) // creates a pseudo-stereo effect
                 // could be good for copying faint CW signals
               {
                 float_buffer_L[i] = iFFT_buffer[FFT_length + (i * 2)];
@@ -3742,27 +3594,27 @@ void loop() {
           uint8_t VAD_high = 127;
           float32_t lf_freq; // = (offset - width/2) / (12000 / NR_FFT_L); // bin BW is 46.9Hz [12000Hz / 256 bins] @96kHz
           float32_t uf_freq;
-          if(bands[band].FLoCut <= 0 && bands[band].FHiCut >= 0)
+          if(qsd.bands[qsd.band].FLoCut <= 0 && qsd.bands[qsd.band].FHiCut >= 0)
           {
             lf_freq = 0.0;
-            uf_freq = fmax(-(float32_t)bands[band].FLoCut, (float32_t)bands[band].FHiCut);
+            uf_freq = fmax(-(float32_t)qsd.bands[qsd.band].FLoCut, (float32_t)qsd.bands[qsd.band].FHiCut);
           }
           else
           {
-            if(bands[band].FLoCut > 0)
+            if(qsd.bands[qsd.band].FLoCut > 0)
             {
-              lf_freq = (float32_t)bands[band].FLoCut;
-              uf_freq = (float32_t)bands[band].FHiCut;
+              lf_freq = (float32_t)qsd.bands[qsd.band].FLoCut;
+              uf_freq = (float32_t)qsd.bands[qsd.band].FHiCut;
             }
             else
             {
-                uf_freq = -(float32_t)bands[band].FLoCut;
-                lf_freq = -(float32_t)bands[band].FHiCut;
+                uf_freq = -(float32_t)qsd.bands[qsd.band].FLoCut;
+                lf_freq = -(float32_t)qsd.bands[qsd.band].FHiCut;
             }
           }
           // / rate DF SR[SAMPLE_RATE].rate/DF
-          lf_freq /= ((SR[SAMPLE_RATE].rate/DF) / NR_FFT_L); // bin BW is 46.9Hz [12000Hz / 256 bins] @96kHz
-          uf_freq /= ((SR[SAMPLE_RATE].rate/DF) / NR_FFT_L);
+          lf_freq /= ((qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate/DF) / NR_FFT_L); // bin BW is 46.9Hz [12000Hz / 256 bins] @96kHz
+          uf_freq /= ((qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate/DF) / NR_FFT_L);
 
                   VAD_low = (int)lf_freq;
                   VAD_high = (int)uf_freq;
@@ -4189,9 +4041,9 @@ void loop() {
         tft.setTextColor(ILI9341_GREEN);
         tft.setFont(Arial_9);
         mean = sum / idx_t;
-        if (mean / 29.00 / N_BLOCKS * SR[SAMPLE_RATE].rate / AUDIO_SAMPLE_RATE_EXACT < 100.0)
+        if (mean / 29.00 / N_BLOCKS * qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / AUDIO_SAMPLE_RATE_EXACT < 100.0)
         {
-          tft.print (mean / 29.00 / N_BLOCKS * SR[SAMPLE_RATE].rate / AUDIO_SAMPLE_RATE_EXACT);
+          tft.print (mean / 29.00 / N_BLOCKS * qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / AUDIO_SAMPLE_RATE_EXACT);
           tft.print("%");
         }
         else
@@ -4218,7 +4070,7 @@ void loop() {
           zoom_sample_ptr = 0;
           }
       */
-      if (band[bands].mode == DEMOD_DCF77)
+      if (qsd.band[qsd.bands].mode == DEMOD_DCF77)
       {
       }
       if (auto_codec_gain == 1)
@@ -4351,7 +4203,7 @@ void IQ_phase_correction (float32_t *I_buffer, float32_t *Q_buffer, float32_t fa
 void AGC_prep()
 {
   float32_t tmp;
-  float32_t sample_rate = (float32_t)SR[SAMPLE_RATE].rate / DF;
+  float32_t sample_rate = (float32_t)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / DF;
   // Start variables taken from wdsp
   // RXA.c !!!!
   /*
@@ -4577,7 +4429,7 @@ void AGC()
               if (hang_enable && (hang_backaverage > hang_level))
               {
                 state = 2;
-                hang_counter = (int)(hangtime * SR[SAMPLE_RATE].rate / DF);
+                hang_counter = (int)(hangtime * qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / DF);
                 decay_type = 1;
               }
               else
@@ -4696,13 +4548,13 @@ void filter_bandwidth()
 {
   AudioNoInterrupts();
   sgtl5000_1.dacVolume(0.0);
-  calc_cplx_FIR_coeffs (FIR_Coef_I, FIR_Coef_Q, m_NumTaps, (float32_t)bands[band].FLoCut, (float32_t)bands[band].FHiCut, (float)SR[SAMPLE_RATE].rate / DF);
+  calc_cplx_FIR_coeffs (FIR_Coef_I, FIR_Coef_Q, m_NumTaps, (float32_t)qsd.bands[qsd.band].FLoCut, (float32_t)qsd.bands[qsd.band].FHiCut, (float)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / DF);
   init_filter_mask();
 
   // also adjust IIR AM filter
-  int filter_BW_highest = bands[band].FHiCut;
-  if (filter_BW_highest < - bands[band].FLoCut) filter_BW_highest = - bands[band].FLoCut;
-  set_IIR_coeffs ((float32_t)filter_BW_highest, 1.3, (float32_t)SR[SAMPLE_RATE].rate / DF, 0); // 1st stage
+  int filter_BW_highest = qsd.bands[qsd.band].FHiCut;
+  if (filter_BW_highest < - qsd.bands[qsd.band].FLoCut) filter_BW_highest = - qsd.bands[qsd.band].FLoCut;
+  set_IIR_coeffs ((float32_t)filter_BW_highest, 1.3, (float32_t)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / DF, 0); // 1st stage
   for (i = 0; i < 5; i++)
   {
     biquad_lowpass1_coeffs[i] = coefficient_set[i];
@@ -5155,9 +5007,9 @@ void init_filter_mask()
 void Zoom_FFT_prep()
 { // take value of spectrum_zoom and initialize IIR lowpass and FIR decimation filters for the right values
 
-  float32_t Fstop_Zoom = 0.5 * (float32_t) SR[SAMPLE_RATE].rate / (1 << spectrum_zoom);
+  float32_t Fstop_Zoom = 0.5 * (float32_t) qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / (1 << spectrum_zoom);
   //    Serial.print("Fstop =  "); Serial.println(Fstop_Zoom);
-  calc_FIR_coeffs (Fir_Zoom_FFT_Decimate_coeffs, 4, Fstop_Zoom, 60, 0, 0.0, (float32_t)SR[SAMPLE_RATE].rate);
+  calc_FIR_coeffs (Fir_Zoom_FFT_Decimate_coeffs, 4, Fstop_Zoom, 60, 0, 0.0, (float32_t)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
 
   if (spectrum_zoom < 7)
   {
@@ -5221,7 +5073,7 @@ void Zoom_FFT_exe (uint32_t blockSize)
 
   if (spectrum_zoom != SPECTRUM_ZOOM_1)
   {
-    if (band[bands].mode == DEMOD_WFM)
+    if (qsd.band[qsd.bands].mode == DEMOD_WFM)
     {
       arm_biquad_cascade_df1_f32 (&IIR_biquad_Zoom_FFT_I, float_buffer_R, x_buffer, blockSize);
       arm_biquad_cascade_df1_f32 (&IIR_biquad_Zoom_FFT_Q, iFFT_buffer, y_buffer, blockSize);
@@ -5305,7 +5157,7 @@ void Zoom_FFT_exe (uint32_t blockSize)
     // adjust lowpass filter coefficient, so that
     // "spectrum display smoothness" is the same across the different sample rates
     // and the same across different magnify modes . . .
-    float32_t LPFcoeff = LPF_spectrum * (AUDIO_SAMPLE_RATE_EXACT / SR[SAMPLE_RATE].rate);
+    float32_t LPFcoeff = LPF_spectrum * (AUDIO_SAMPLE_RATE_EXACT / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
 
     float32_t onem_LPFcoeff = 1.0 - LPFcoeff;
 //    onem_LPFcoeff *= (float32_t)(1 << spectrum_zoom) / N_BLOCKS / BUFFER_SIZE;
@@ -5373,15 +5225,15 @@ void codec_gain()
   {
     if (timer >= 5)     // has enough time passed since the last gain decrease?
     {
-      if (bands[band].RFgain != 0)       // yes - is this NOT zero?
+      if (qsd.bands[qsd.band].RFgain != 0)       // yes - is this NOT zero?
       {
-        bands[band].RFgain -= 1;    // decrease gain one step, 1.5dB
-        if (bands[band].RFgain < 0)
+        qsd.bands[qsd.band].RFgain -= 1;    // decrease gain one step, 1.5dB
+        if (qsd.bands[qsd.band].RFgain < 0)
         {
-          bands[band].RFgain = 0;
+          qsd.bands[qsd.band].RFgain = 0;
         }
         timer = 0;  // reset the adjustment timer
-        sgtl5000_1.lineInLevel(bands[band].RFgain);
+        sgtl5000_1.lineInLevel(qsd.bands[qsd.band].RFgain);
         if (Menu2 == MENU_RF_GAIN) show_menu();
       }
     }
@@ -5390,13 +5242,13 @@ void codec_gain()
   {
     if (timer >= 25)       // has it been long enough since the last increase?
     {
-      bands[band].RFgain += 1;    // increase gain by one step, 1.5dB
+      qsd.bands[qsd.band].RFgain += 1;    // increase gain by one step, 1.5dB
       timer = 0;  // reset the timer to prevent this from executing too often
-      if (bands[band].RFgain > 15)
+      if (qsd.bands[qsd.band].RFgain > 15)
       {
-        bands[band].RFgain = 15;
+        qsd.bands[qsd.band].RFgain = 15;
       }
-      sgtl5000_1.lineInLevel(bands[band].RFgain);
+      sgtl5000_1.lineInLevel(qsd.bands[qsd.band].RFgain);
       if (Menu2 == MENU_RF_GAIN) show_menu();
     }
   }
@@ -5410,7 +5262,7 @@ void calc_256_magn()
   float32_t spec_help = 0.0;
   // adjust lowpass filter coefficient, so that
   // "spectrum display smoothness" is the same across the different sample rates
-  float32_t LPFcoeff = LPF_spectrum * (AUDIO_SAMPLE_RATE_EXACT / SR[SAMPLE_RATE].rate);
+  float32_t LPFcoeff = LPF_spectrum * (AUDIO_SAMPLE_RATE_EXACT / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
   if (LPFcoeff > 1.0) LPFcoeff = 1.0;
 
   for (i = 0; i < 256; i++)
@@ -5680,18 +5532,18 @@ void show_bandwidth ()
   // and displays the bandwidth bar indicating demodulation bandwidth
   if (spectrum_zoom != SPECTRUM_ZOOM_1) spectrum_pos_centre_f = 128;
   else spectrum_pos_centre_f = 64;
-  float32_t pixel_per_khz = (1 << spectrum_zoom) * 256.0 / SR[SAMPLE_RATE].rate * 1000.0;
-  int len = (int)((bands[band].FHiCut - bands[band].FLoCut) / 1000.0 * pixel_per_khz);
-  int pos_left = (int)(bands[band].FLoCut / 1000.0 * pixel_per_khz) + spectrum_pos_centre_f + spectrum_x;
+  float32_t pixel_per_khz = (1 << spectrum_zoom) * 256.0 / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate * 1000.0;
+  int len = (int)((qsd.bands[qsd.band].FHiCut - qsd.bands[qsd.band].FLoCut) / 1000.0 * pixel_per_khz);
+  int pos_left = (int)(qsd.bands[qsd.band].FLoCut / 1000.0 * pixel_per_khz) + spectrum_pos_centre_f + spectrum_x;
 
-  if (bands[band].mode == DEMOD_SAM_USB)
+  if (qsd.bands[qsd.band].mode == DEMOD_SAM_USB)
   {
-    len = (int)(bands[band].FHiCut / 1000.0 * pixel_per_khz);
+    len = (int)(qsd.bands[qsd.band].FHiCut / 1000.0 * pixel_per_khz);
     pos_left = spectrum_pos_centre_f + spectrum_x;
   }
-  else if (bands[band].mode == DEMOD_SAM_LSB)
+  else if (qsd.bands[qsd.band].mode == DEMOD_SAM_LSB)
   {
-    len = - (int)(bands[band].FLoCut / 1000.0 * pixel_per_khz);
+    len = - (int)(qsd.bands[qsd.band].FLoCut / 1000.0 * pixel_per_khz);
     pos_left = spectrum_pos_centre_f + spectrum_x - len;
   }
 
@@ -5731,19 +5583,19 @@ void show_bandwidth ()
   tft.setCursor(10, 25);
   tft.setFont(Arial_9);
   tft.setTextColor(ILI9341_WHITE);
-  tft.print(DEMOD[band[bands].mode].text);
-  if (bands[band].mode != DEMOD_SAM_USB) sprintf(string, "%02.1f kHz", (float)(bands[band].FLoCut / 1000.0)); //kHz);
+  tft.print(DEMOD[qsd.band[qsd.bands].mode].text);
+  if (qsd.bands[qsd.band].mode != DEMOD_SAM_USB) sprintf(string, "%02.1f kHz", (float)(qsd.bands[qsd.band].FLoCut / 1000.0)); //kHz);
   else sprintf(string, "%02.1f kHz", 0.0);
   tft.setCursor(70, 25);
   tft.print(string);
-  if (bands[band].mode != DEMOD_SAM_LSB) sprintf(string, "%02.1f kHz", (float)(bands[band].FHiCut / 1000.0)); //kHz);
+  if (qsd.bands[qsd.band].mode != DEMOD_SAM_LSB) sprintf(string, "%02.1f kHz", (float)(qsd.bands[qsd.band].FHiCut / 1000.0)); //kHz);
   else sprintf(string, "%02.1f kHz", 0.0);
   tft.setCursor(130, 25);
   tft.print(string);
   tft.setCursor(180, 25);
   //tft.print("   SR: ");
   tft.print("  ");
-  tft.print(SR[SAMPLE_RATE].text);
+  tft.print(qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].text);
   show_tunestep();
   tft.setTextColor(ILI9341_WHITE); // set text color to white for other print routines not to get confused ;-)
   //  AudioInterrupts();
@@ -5843,7 +5695,7 @@ void prepare_spectrum_display()
   tft.print("+20dB");
   FrequencyBarText();
   show_menu();
-  show_notch((int)notches[0], bands[band].mode);
+  show_notch((int)notches[0], qsd.bands[qsd.band].mode);
 
 } // END prepare_spectrum_display
 
@@ -5856,7 +5708,7 @@ void FrequencyBarText()
   float   grat;
   int centerIdx;
   const int pos_grat_y = 20;
-  grat = (float)(SR[SAMPLE_RATE].rate / 8000.0) / (float)(1 << spectrum_zoom); // 1, 2, 4, 8, 16, 32, 64 . . . 4096
+  grat = (float)(qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / 8000.0) / (float)(1 << spectrum_zoom); // 1, 2, 4, 8, 16, 32, 64 . . . 4096
 
   /*    if(spectrum_zoom == SPECTRUM_SUPER_ZOOM)
       {
@@ -5869,16 +5721,16 @@ void FrequencyBarText()
   //    tft.fillRect(0, spectrum_y + spectrum_height + pos_grat_y, 320, 8, ILI9341_BLACK);
   tft.fillRect(0, spectrum_y + spectrum_height + 5, 320, 240 - spectrum_y - spectrum_height - 5, ILI9341_BLACK);
 
-  freq_calc = (float)(bands[band].freq / SI5351_FREQ_MULT);      // get current frequency in Hz
-  if (band[bands].mode == DEMOD_WFM)
+  freq_calc = (float)(qsd.bands[qsd.band].freq / SI5351_FREQ_MULT);      // get current frequency in Hz
+  if (qsd.band[qsd.bands].mode == DEMOD_WFM)
   { // undersampling mode with 3x undersampling
     // grat *= 5.0;
-    freq_calc = 3.0 * freq_calc + 0.75 * SR[SAMPLE_RATE].rate;;
+    freq_calc = 3.0 * freq_calc + 0.75 * qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate;;
   }
 
   if (spectrum_zoom == 0)        //
   {
-    freq_calc += (float32_t)SR[SAMPLE_RATE].rate / 4.0;
+    freq_calc += (float32_t)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / 4.0;
   }
 
   if (spectrum_zoom < 3)
@@ -6178,11 +6030,11 @@ void show_frequency(unsigned long long freq, uint8_t text_size) {
   int8_t font_width = 8;
   int8_t sch_help = 0;
   freq = freq / SI5351_FREQ_MULT;
-  if (bands[band].mode == DEMOD_WFM)
+  if (qsd.bands[qsd.band].mode == DEMOD_WFM)
   {
     // old undersampling 5 times MODE, now switched to 3 times undersampling
     //        freq = freq * 5 + 1.25 * SR[SAMPLE_RATE].rate; // undersampling of f/5 and correction, because no IF is used in WFM mode
-    freq = freq * 3 + 0.75 * SR[SAMPLE_RATE].rate; // undersampling of f/3 and correction, because no IF is used in WFM mode
+    freq = freq * 3 + 0.75 * qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate; // undersampling of f/3 and correction, because no IF is used in WFM mode
     erase_flag = 1;
   }
   if (text_size == 0) // small SAM carrier display
@@ -6289,61 +6141,6 @@ void show_frequency(unsigned long long freq, uint8_t text_size) {
 
 } // END VOID SHOW-FREQUENCY
 
-void setfreq () {
-  // NEVER USE AUDIONOINTERRUPTS HERE: that introduces annoying clicking noise with every frequency change
-  //   hilfsf = (bands[band].freq +  IF_FREQ) * 10000000 * MASTER_CLK_MULT * SI5351_FREQ_MULT;
-  hilfsf = (bands[band].freq +  IF_FREQ * SI5351_FREQ_MULT) * 1000000000 * MASTER_CLK_MULT; // SI5351_FREQ_MULT is 100ULL;
-  hilfsf = hilfsf / calibration_factor;
-  si5351.set_freq(hilfsf, Si_5351_clock);
-  if (band[bands].mode == DEMOD_AUTOTUNE)
-  {
-    autotune_flag = 1;
-  }
-  FrequencyBarText();
-
-  // LPF switching follows here
-  // Five filter banks there:
-  // longwave LPF 295kHz, mediumwave I LPF 955kHz, mediumwave II LPF 2MHz, tropical bands LPF 5.4MHz, others LPF LPF 30MHz
-  // LW: Band5
-  // MW: Band3 (up to 955kHz)
-  // MW: Band1 (up tp 1996kHz)
-  // SW: Band2 (up to 5400kHz)
-  // SW: Band4 (up up up)
-  //
-  // LOWPASS 955KHZ
-  if (((bands[band].freq + IF_FREQ * SI5351_FREQ_MULT) < 955001 * SI5351_FREQ_MULT) && ((bands[band].freq + IF_FREQ * SI5351_FREQ_MULT) > 300001 * SI5351_FREQ_MULT)) {
-    digitalWrite (Band3, HIGH); //Serial.println ("Band3");
-    digitalWrite (Band1, LOW); digitalWrite (Band2, LOW); digitalWrite (Band4, LOW); digitalWrite (Band5, LOW);
-  } // end if
-
-  // LOWPASS 2MHZ
-  if (((bands[band].freq + IF_FREQ * SI5351_FREQ_MULT) > 955000 * SI5351_FREQ_MULT) && ((bands[band].freq + IF_FREQ * SI5351_FREQ_MULT) < 1996001 * SI5351_FREQ_MULT)) {
-    digitalWrite (Band1, HIGH);//Serial.println ("Band1");
-    digitalWrite (Band5, LOW); digitalWrite (Band3, LOW); digitalWrite (Band4, LOW); digitalWrite (Band2, LOW);
-  } // end if
-
-  //LOWPASS 5.4MHZ
-  if (((bands[band].freq + IF_FREQ * SI5351_FREQ_MULT) > 1996000 * SI5351_FREQ_MULT) && ((bands[band].freq + IF_FREQ * SI5351_FREQ_MULT) < 5400001 * SI5351_FREQ_MULT)) {
-    digitalWrite (Band2, HIGH);//Serial.println ("Band2");
-    digitalWrite (Band4, LOW); digitalWrite (Band3, LOW); digitalWrite (Band1, LOW); digitalWrite (Band5, LOW);
-  } // end if
-
-  // LOWPASS 30MHZ --> OK
-  if ((bands[band].freq + IF_FREQ * SI5351_FREQ_MULT) > 5400000 * SI5351_FREQ_MULT) {
-    // && ((bands[band].freq + IF_FREQ) < 12500001)) {
-    digitalWrite (Band4, HIGH);//Serial.println ("Band4");
-    digitalWrite (Band1, LOW); digitalWrite (Band3, LOW); digitalWrite (Band2, LOW); digitalWrite (Band5, LOW);
-  } // end if
-  // I took out the 12.5MHz lowpass and inserted the 30MHz instead - I have to live with 3rd harmonic images in the range 5.4 - 12Mhz now
-  // maybe this is more important than the 5.4 - 2Mhz filter ?? Maybe swap them sometime, because I only got five filter relays . . .
-
-  // this is the brandnew longwave LPF (cutoff ca. 295kHz) --> OK
-  if ((bands[band].freq - IF_FREQ * SI5351_FREQ_MULT) < 300000 * SI5351_FREQ_MULT) {
-    digitalWrite (Band5, HIGH);//Serial.println ("Band5");
-    digitalWrite (Band2, LOW); digitalWrite (Band3, LOW); digitalWrite (Band4, LOW); digitalWrite (Band1, LOW);
-  } // end if
-}
-
 void buttons() {
   button1.update(); // BAND --
   button2.update(); // BAND ++
@@ -6363,7 +6160,7 @@ void buttons() {
     }
     else
     {
-      if (--band < FIRST_BAND) band = LAST_BAND; // cycle thru radio bands
+      if (--qsd.band < FIRST_BAND) qsd.band = LAST_BAND; // cycle thru radio bands
       // set frequency_print flag to 0
       AudioNoInterrupts();
       sgtl5000_1.dacVolume(0.0);
@@ -6396,7 +6193,7 @@ void buttons() {
     }
     else
     {
-      if (++band > LAST_BAND) band = FIRST_BAND; // cycle thru radio bands
+      if (++qsd.band > LAST_BAND) qsd.band = FIRST_BAND; // cycle thru radio bands
       // set frequency_print flag to 0
       AudioNoInterrupts();
       sgtl5000_1.dacVolume(0.0);
@@ -6422,19 +6219,19 @@ void buttons() {
     }
     else
     {
-      if (++band[bands].mode > DEMOD_MAX) band[bands].mode = DEMOD_MIN; // cycle thru demod modes
+      if (++qsd.band[qsd.bands].mode > DEMOD_MAX) qsd.band[qsd.bands].mode = DEMOD_MIN; // cycle thru demod modes
       AudioNoInterrupts();
       sgtl5000_1.dacVolume(0.0);
-      setup_mode(band[bands].mode);
-      show_frequency(bands[band].freq, 1);
+      setup_mode(qsd.band[qsd.bands].mode);
+      show_frequency(qsd.bands[qsd.band].freq, 1);
       control_filter_f();
       filter_bandwidth();
       leave_WFM = 0;
       prepare_spectrum_display();
       if (twinpeaks_tested == 3 && twinpeaks_counter >= 200) write_analog_gain = 1;
       show_analog_gain();
-      if (band[bands].mode == DEMOD_WFM) show_spectrum_flag = 0;
-      if (band[bands].mode == 0) show_spectrum_flag = 1;
+      if (qsd.band[qsd.bands].mode == DEMOD_WFM) show_spectrum_flag = 0;
+      if (qsd.band[qsd.bands].mode == 0) show_spectrum_flag = 1;
       idx_t = 0;
       delay(10);
       AudioInterrupts();
@@ -6474,7 +6271,7 @@ void buttons() {
       playMp3.stop();
       playAac.stop();
       delay(200);
-      setI2SFreq (SR[SAMPLE_RATE].rate);
+      setI2SFreq (qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
       delay(200); // essential ?
       mixleft.gain(0, 1.0);
       mixright.gain(0, 1.0);
@@ -6532,7 +6329,7 @@ void buttons() {
       show_menu();
     }
 
-    else autotune_flag = 1;
+    else qsd.tuner.autotune_flag = 1;
     //                Serial.println("Flag gesetzt!");
 
   }
@@ -6570,7 +6367,7 @@ void buttons() {
       playMp3.stop();
       playAac.stop();
       delay(200);
-      setI2SFreq (SR[SAMPLE_RATE].rate);
+      setI2SFreq (qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
       delay(200); // essential ?
       mixleft.gain(0, 1.0);
       mixright.gain(0, 1.0);
@@ -6592,7 +6389,7 @@ void buttons() {
     {
       if (notches_on[0] == 0) notches_on[0] = 1;
       else notches_on[0] = 0;
-      show_notch((int)notches[0], bands[band].mode);
+      show_notch((int)notches[0], qsd.bands[qsd.band].mode);
       show_menu();
     }
     else if (Menu2 == MENU_ANR_TAPS || Menu2 == MENU_ANR_DELAY || Menu2 == MENU_ANR_MU || Menu2 == MENU_ANR_GAMMA)
@@ -6830,7 +6627,7 @@ void show_menu()
       case MENU_RF_GAIN:
         tft.setFont(Arial_11);
         tft.setCursor(spectrum_x + 256 + 6, spectrum_y + 31 + 31 + 7);
-        sprintf(menu_string, "%02.1fdB", (float)(bands[band].RFgain * 1.5));
+        sprintf(menu_string, "%02.1fdB", (float)(qsd.bands[qsd.band].RFgain * 1.5));
         tft.print(menu_string);
         break;
       case MENU_RF_ATTENUATION:
@@ -7193,7 +6990,7 @@ void set_tunestep()
     switch (tune_stepper)
     {
       case 0:
-        if (band == BAND_MW || band == BAND_LW)
+        if (qsd.band == BAND_MW || qsd.band == BAND_LW)
         {
           tunestep = 9000;
         }
@@ -7218,7 +7015,7 @@ void set_tunestep()
     switch (tune_stepper)
     {
       case 0:
-        if (band == BAND_MW || band == BAND_LW)
+        if (qsd.band == BAND_MW || qsd.band == BAND_LW)
         {
           tunestep = 3000;
         }
@@ -7267,7 +7064,7 @@ void autotune() {
   // --> in reality, we achieve about 0.2Hz accuracy, not bad
 
   const float32_t buff_len = FFT_length * 2.0;
-  const float32_t bin_BW = (float32_t) (SR[SAMPLE_RATE].rate * 2.0 / DF / (buff_len));
+  const float32_t bin_BW = (float32_t) (qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate * 2.0 / DF / (buff_len));
   //    const int buff_len_int = FFT_length * 2;
   float32_t bw_LSB = 0.0;
   float32_t bw_USB = 0.0;
@@ -7278,8 +7075,8 @@ void autotune() {
   // FFT_buffer is already frequency-translated !
   // so we do not need to worry about that IF stuff
   const int posbin = FFT_length / 2; //
-  bw_LSB = -(float32_t)bands[band].FLoCut;
-  bw_USB = (float32_t)bands[band].FHiCut;
+  bw_LSB = -(float32_t)qsd.bands[qsd.band].FLoCut;
+  bw_USB = (float32_t)qsd.bands[qsd.band].FHiCut;
   // include 500Hz of the other sideband into the search bandwidth
   if (bw_LSB < 1.0) bw_LSB = 500.0;
   if (bw_USB < 1.0) bw_USB = 500.0;
@@ -7308,7 +7105,7 @@ void autotune() {
   }
 
   //####################################################################
-  if (autotune_flag == 1)
+  if (qsd.tuner.autotune_flag == 1)
   {
     // look for maximum value and save the bin # for frequency delta calculation
     float32_t maximum = 0.0;
@@ -7331,12 +7128,13 @@ void autotune() {
     //        Serial.print("posbin = ");
     //        Serial.println(posbin);
 
-    bands[band].freq = bands[band].freq  + (long long)(delta * SI5351_FREQ_MULT);
-    setfreq();
-    show_frequency(bands[band].freq, 1);
+    qsd.bands[qsd.band].freq = qsd.bands[qsd.band].freq  + (long long)(delta * SI5351_FREQ_MULT);
+    qsd.setfreq();
+    FrequencyBarText();
+    show_frequency(qsd.bands[qsd.band].freq, 1);
     //        Serial.print("delta = ");
     //        Serial.println(delta);
-    autotune_flag = 2;
+    qsd.tuner.autotune_flag = 2;
   }
   else
   {
@@ -7360,25 +7158,26 @@ void autotune() {
     float32_t delta = (bin_BW * ((bin3 - bin1)) / (2 * bin2 - bin1 - bin3));
     if (delta > bin_BW) delta = 0.0; // just in case something went wrong
 
-    bands[band].freq = bands[band].freq  + (long long)(delta * SI5351_FREQ_MULT);
-    setfreq();
-    show_frequency(bands[band].freq, 1);
+    qsd.bands[qsd.band].freq = qsd.bands[qsd.band].freq  + (long long)(delta * SI5351_FREQ_MULT);
+    qsd.setfreq();
+    FrequencyBarText();
+    show_frequency(qsd.bands[qsd.band].freq, 1);
 
-    if (band[bands].mode == DEMOD_AUTOTUNE)
+    if (qsd.band[qsd.bands].mode == DEMOD_AUTOTUNE)
     {
-      autotune_flag = 0;
+      qsd.tuner.autotune_flag = 0;
     }
     else
     {
       // empirically derived: it seems good to perform the whole tuning some 5 to 10 times
       // in order to be perfect on the carrier frequency
-      if (autotune_flag < 6)
+      if (qsd.tuner.autotune_flag < 6)
       {
-        autotune_flag++;
+        qsd.tuner.autotune_flag++;
       }
       else
       {
-        autotune_flag = 0;
+        qsd.tuner.autotune_flag = 0;
         AudioNoInterrupts();
         Q_in_L.clear();
         Q_in_R.clear();
@@ -7416,11 +7215,12 @@ void show_tunestep() {
 void set_band () {
   //         show_band(bands[band].name); // show new band
   old_demod_mode = -99; // used in setup_mode, so that LoCut and HiCut are not changed!
-  setup_mode(bands[band].mode);
-  sgtl5000_1.lineInLevel(bands[band].RFgain, bands[band].RFgain);
+  setup_mode(qsd.bands[qsd.band].mode);
+  sgtl5000_1.lineInLevel(qsd.bands[qsd.band].RFgain, qsd.bands[qsd.band].RFgain);
   //         setup_RX(bands[band].mode, bands[band].bandwidthU, bands[band].bandwidthL);  // set up the audio chain for new mode
-  setfreq();
-  show_frequency(bands[band].freq, 1);
+  qsd.setfreq();
+  FrequencyBarText();
+  show_frequency(qsd.bands[qsd.band].freq, 1);
   filter_bandwidth();
 }
 
@@ -7441,27 +7241,27 @@ void setup_mode(int MO) {
   {
      if (MO == DEMOD_LSB) // switch from USB to LSB
       {
-        temp = band[bands].FHiCut;
-        band[bands].FHiCut = - band[bands].FLoCut;
-        band[bands].FLoCut = - temp;
+        temp = qsd.band[qsd.bands].FHiCut;
+        qsd.band[qsd.bands].FHiCut = - qsd.band[qsd.bands].FLoCut;
+        qsd.band[qsd.bands].FLoCut = - temp;
       }
       else     if (MO == DEMOD_AM2) // switch from LSB to AM
       {
-        band[bands].FHiCut = - band[bands].FLoCut;
+        qsd.band[qsd.bands].FHiCut = - qsd.band[qsd.bands].FLoCut;
       }
       else     if (MO == DEMOD_SAM_STEREO) // switch from SAM to SAM_STEREO
       {
-        temp = bands[band].FHiCut;
-        if (temp < - bands[band].FLoCut) 
+        temp = qsd.bands[qsd.band].FHiCut;
+        if (temp < - qsd.bands[qsd.band].FLoCut) 
         {
-          temp = - bands[band].FLoCut;
+          temp = - qsd.bands[qsd.band].FLoCut;
         }
-        band[bands].FHiCut = temp;
-        band[bands].FLoCut = temp;
+        qsd.band[qsd.bands].FHiCut = temp;
+        qsd.band[qsd.bands].FLoCut = temp;
       }
   }
   show_bandwidth();
-  if (band[bands].mode == DEMOD_WFM)
+  if (qsd.band[qsd.bands].mode == DEMOD_WFM)
   {
     tft.fillRect(spectrum_x + 256 + 2, pos_y_time + 20, 320 - spectrum_x - 258, 31, ILI9341_BLACK);
   }
@@ -7470,7 +7270,7 @@ void setup_mode(int MO) {
   tft.fillRect(pos_x_frequency + 10, pos_y_frequency + 24, 210, 16, ILI9341_BLACK);
   freq_flag[0] = 0;
   //    show_notch((int)notches[0], bands[band].mode);
-  old_demod_mode = bands[band].mode; // set old_mode flag for next time, at the moment only used for first time radio is switched on . . .
+  old_demod_mode = qsd.bands[qsd.band].mode; // set old_mode flag for next time, at the moment only used for first time radio is switched on . . .
 } // end void setup_mode
 
 
@@ -7492,13 +7292,13 @@ void encoders () {
     encoder_change = (encoder_pos - last_encoder_pos);
     last_encoder_pos = encoder_pos;
 
-    if (((band == BAND_LW) || (band == BAND_MW)) && (tunestep == 5000))
+    if (((qsd.band == BAND_LW) || (qsd.band == BAND_MW)) && (tunestep == 5000))
     {
       tune_stepper = 0;
       set_tunestep();
       show_tunestep();
     }
-    if (((band != BAND_LW) && (band != BAND_MW)) && (tunestep == 9000))
+    if (((qsd.band != BAND_LW) && (qsd.band != BAND_MW)) && (tunestep == 9000))
     {
       tune_stepper = 0;
       set_tunestep();
@@ -7511,7 +7311,7 @@ void encoders () {
       else if (encoder_change >= -4 && encoder_change < 0) encoder_change = - 4;
     }
     long long tune_help1;
-    if (bands[band].mode == DEMOD_WFM)
+    if (qsd.bands[qsd.band].mode == DEMOD_WFM)
     { // hopefully tunes FM stations in 25kHz steps ;-)
       tune_help1 = (long long)833333 * (long long)roundf((float32_t)encoder_change / 4.0);
     }
@@ -7520,16 +7320,17 @@ void encoders () {
       tune_help1 = (long long)tunestep  * SI5351_FREQ_MULT * (long long)roundf((float32_t)encoder_change / 4.0);
     }
     //    long long tune_help1 = tunestep  * SI5351_FREQ_MULT * encoder_change;
-    old_freq = bands[band].freq;
-    bands[band].freq += (long long)tune_help1;  // tune the master vfo
-    if (bands[band].freq > F_MAX) bands[band].freq = F_MAX;
-    if (bands[band].freq < F_MIN) bands[band].freq = F_MIN;
-    if (bands[band].freq != old_freq)
+    old_freq = qsd.bands[qsd.band].freq;
+    qsd.bands[qsd.band].freq += (long long)tune_help1;  // tune the master vfo
+    if (qsd.bands[qsd.band].freq > F_MAX) qsd.bands[qsd.band].freq = F_MAX;
+    if (qsd.bands[qsd.band].freq < F_MIN) qsd.bands[qsd.band].freq = F_MIN;
+    if (qsd.bands[qsd.band].freq != old_freq)
     {
       Q_in_L.clear();
       Q_in_R.clear();
-      setfreq();
-      show_frequency(bands[band].freq, 1);
+      qsd.setfreq();
+      FrequencyBarText();
+      show_frequency(qsd.bands[qsd.band].freq, 1);
       return;
     }
     show_menu();
@@ -7542,20 +7343,21 @@ void encoders () {
     which_menu = 1;
     if (Menu_pointer == MENU_F_HI_CUT)
     {
-      if(abs(band[bands].FHiCut) < 500)
+      if(abs(qsd.band[qsd.bands].FHiCut) < 500)
       {
-        band[bands].FHiCut = band[bands].FHiCut + encoder2_change * 12.5;
+        qsd.band[qsd.bands].FHiCut = qsd.band[qsd.bands].FHiCut + encoder2_change * 12.5;
       }
       else
       {
-        band[bands].FHiCut = band[bands].FHiCut + encoder2_change * 25.0;
+        qsd.band[qsd.bands].FHiCut = qsd.band[qsd.bands].FHiCut + encoder2_change * 25.0;
       }
       control_filter_f();
       // set Menu2 to MENU_F_LO_CUT
       Menu2 = MENU_F_LO_CUT;
       filter_bandwidth();
-      setfreq();
-      show_frequency(bands[band].freq, 1);
+      qsd.setfreq();
+      FrequencyBarText();
+      show_frequency(qsd.bands[qsd.band].freq, 1);
     }
     else if (Menu_pointer == MENU_SPECTRUM_ZOOM)
     {
@@ -7572,7 +7374,7 @@ void encoders () {
       //        Serial.print("ZOOM factor:  "); Serial.println(1<<spectrum_zoom);
       show_bandwidth ();
       FrequencyBarText();
-      show_notch((int)notches[0], bands[band].mode);
+      show_notch((int)notches[0], qsd.bands[qsd.band].mode);
     } // END Spectrum_zoom
 
     else if (Menu_pointer == MENU_IQ_AMPLITUDE)
@@ -7596,16 +7398,17 @@ void encoders () {
     {
       //          if(encoder2_change < 0) SAMPLE_RATE--;
       //            else SAMPLE_RATE++;
-      SAMPLE_RATE += (long)((float)encoder2_change / 4.0);
+      qsd.audioADC.SAMPLE_RATE += (long)((float)encoder2_change / 4.0);
       wait_flag = 1;
       AudioNoInterrupts();
-      if (SAMPLE_RATE > SAMPLE_RATE_MAX) SAMPLE_RATE = SAMPLE_RATE_MAX;
-      if (SAMPLE_RATE < SAMPLE_RATE_MIN) SAMPLE_RATE = SAMPLE_RATE_MIN;
-      setI2SFreq (SR[SAMPLE_RATE].rate);
+      if (qsd.audioADC.SAMPLE_RATE > SAMPLE_RATE_MAX) qsd.audioADC.SAMPLE_RATE = SAMPLE_RATE_MAX;
+      if (qsd.audioADC.SAMPLE_RATE < SAMPLE_RATE_MIN) qsd.audioADC.SAMPLE_RATE = SAMPLE_RATE_MIN;
+      setI2SFreq (qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
       delay(500);
-      IF_FREQ = SR[SAMPLE_RATE].rate / 4;
+      qsd.audioADC.IF_FREQ = qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / 4;
       // this sets the frequency, but without knowing the IF!
-      setfreq();
+      qsd.setfreq();
+      FrequencyBarText();
       prepare_spectrum_display(); // show new frequency scale
       //          LP_Fpass_old = 0; // cheat the filter_bandwidth function ;-)
       // before calculating the filter, we have to assure, that the filter bandwidth is not larger than
@@ -7716,18 +7519,18 @@ void encoders () {
         Menus[MENU_RF_GAIN].text2 = "  gain  ";
         //          Serial.println ("auto = 0");
       }
-      bands[band].RFgain = bands[band].RFgain + encoder3_change / 4;
-      if (bands[band].RFgain < 0)
+      qsd.bands[qsd.band].RFgain = qsd.bands[qsd.band].RFgain + encoder3_change / 4;
+      if (qsd.bands[qsd.band].RFgain < 0)
       {
         auto_codec_gain = 1; //Serial.println ("auto = 1");
         Menus[MENU_RF_GAIN].text2 = " AUTO  ";
-        bands[band].RFgain = 0;
+        qsd.bands[qsd.band].RFgain = 0;
       }
-      if (bands[band].RFgain > 15)
+      if (qsd.bands[qsd.band].RFgain > 15)
       {
-        bands[band].RFgain = 15;
+        qsd.bands[qsd.band].RFgain = 15;
       }
-      sgtl5000_1.lineInLevel(bands[band].RFgain);
+      sgtl5000_1.lineInLevel(qsd.bands[qsd.band].RFgain);
     }
     else if (Menu2 == MENU_VOLUME)
     {
@@ -7778,7 +7581,7 @@ void encoders () {
       }
       else if (notches[0] > 9900.0) notches[0] = 9900.0;
       //      notches_on[0] = 1;
-      show_notch((int)notches[0], bands[band].mode);
+      show_notch((int)notches[0], qsd.bands[qsd.band].mode);
       oldnotchF = notches[0];
     }
     else if (Menu2 == MENU_NOTCH_1_BW)
@@ -7789,7 +7592,7 @@ void encoders () {
         notches_BW[0] = 1;
       }
       else if (notches_BW[0] > 300) notches_BW[0] = 300;
-      show_notch((int)notches[0], bands[band].mode);
+      show_notch((int)notches[0], qsd.bands[qsd.band].mode);
       oldnotchF = notches[0];
     }
     /*    else if(Menu2 == MENU_NOTCH_2)
@@ -7953,18 +7756,19 @@ void encoders () {
     }
     else if (Menu2 == MENU_F_LO_CUT)
     {
-      if(abs(band[bands].FLoCut) < 500)
+      if(abs(qsd.band[qsd.bands].FLoCut) < 500)
       {
-        band[bands].FLoCut = band[bands].FLoCut + encoder3_change * 12.5;
+        qsd.band[qsd.bands].FLoCut = qsd.band[qsd.bands].FLoCut + encoder3_change * 12.5;
       }
       else
       {
-        band[bands].FLoCut = band[bands].FLoCut + encoder3_change * 25.0;
+        qsd.band[qsd.bands].FLoCut = qsd.band[qsd.bands].FLoCut + encoder3_change * 25.0;
       }
       control_filter_f();
       filter_bandwidth();
-      setfreq();
-      show_frequency(bands[band].freq, 1);
+      qsd.setfreq();
+      FrequencyBarText();
+      show_frequency(qsd.bands[qsd.band].freq, 1);
     }
 /*    else if (Menu2 == MENU_NR_L)
     {
@@ -8287,15 +8091,15 @@ void set_SAM_PLL() {
   //float32_t zeta = 0.8; // PLL step response: smaller, slower response 1.0 - 0.1
   //float32_t omegaN = 250.0; // PLL bandwidth 50.0 - 1000.0
 
-  omega_min = TPI * (-pll_fmax) * DF / SR[SAMPLE_RATE].rate;
-  omega_max = TPI * pll_fmax * DF / SR[SAMPLE_RATE].rate;
+  omega_min = TPI * (-pll_fmax) * DF / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate;
+  omega_max = TPI * pll_fmax * DF / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate;
   zeta = (float32_t)zeta_help / 100.0;
-  g1 = 1.0 - expf(-2.0 * omegaN * zeta * DF / SR[SAMPLE_RATE].rate);
-  g2 = - g1 + 2.0 * (1 - expf(- omegaN * zeta * DF / SR[SAMPLE_RATE].rate) * cosf(omegaN * DF / SR[SAMPLE_RATE].rate * sqrtf(1.0 - zeta * zeta)));
+  g1 = 1.0 - expf(-2.0 * omegaN * zeta * DF / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
+  g2 = - g1 + 2.0 * (1 - expf(- omegaN * zeta * DF / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate) * cosf(omegaN * DF / qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate * sqrtf(1.0 - zeta * zeta)));
 
-  mtauR = expf(- DF / (SR[SAMPLE_RATE].rate * tauR));
+  mtauR = expf(- DF / (qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate * tauR));
   onem_mtauR = 1.0 - mtauR;
-  mtauI = expf(- DF / (SR[SAMPLE_RATE].rate * tauI));
+  mtauI = expf(- DF / (qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate * tauI));
   onem_mtauI = 1.0 - mtauI;
 }
 
@@ -8479,7 +8283,7 @@ void Calculatedbm()
   float32_t sum_db = 0.0; // FIXME: mabye this slows down the FPU, because the FPU does only process 32bit floats ???
   int posbin = 0;
   // bin_bandwidth = samplerate / 256bins
-  float32_t bin_bandwidth = (float32_t) (SR[SAMPLE_RATE].rate / (256.0));
+  float32_t bin_bandwidth = (float32_t) (qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / (256.0));
   // width of a 256 tap FFT bin @ 96ksps = 375Hz
   // we have to take into account the magnify mode
   // --> recalculation of bin_BW
@@ -8499,26 +8303,26 @@ void Calculatedbm()
   //  determine Lbin and Ubin from ts.dmod_mode and FilterInfo.width
   //  = determine bandwith separately for lower and upper sideband
 #if 0
-  switch (band[bands].mode)
+  switch (qsd.band[qsd.bands].mode)
   {
     case DEMOD_LSB:
     case DEMOD_SAM_LSB:
       bw_USB = 0.0;
-      bw_LSB = (float32_t)bands[band].bandwidthL;
+      bw_LSB = (float32_t)qsd.bands[qsd.band].bandwidthL;
       break;
     case DEMOD_USB:
     case DEMOD_SAM_USB:
       bw_LSB = 0.0;
-      bw_USB = (float32_t)bands[band].bandwidthU;
+      bw_USB = (float32_t)qsd.bands[qsd.band].bandwidthU;
       break;
     default:
-      bw_LSB = (float32_t)bands[band].bandwidthL;
-      bw_USB = (float32_t)bands[band].bandwidthU;
+      bw_LSB = (float32_t)qsd.bands[qsd.band].bandwidthL;
+      bw_USB = (float32_t)qsd.bands[qsd.band].bandwidthU;
   }
 #endif
 
-  bw_LSB = bands[band].FLoCut;
-  bw_USB = bands[band].FHiCut;
+  bw_LSB = qsd.bands[qsd.band].FLoCut;
+  bw_USB = qsd.bands[qsd.band].FHiCut;
   // calculate upper and lower limit for determination of signal strength
   // = filter passband is between the lower bin Lbin and the upper bin Ubin
   Lbin = (float32_t)posbin + roundf(bw_LSB / bin_bandwidth); // bin on the lower/left side
@@ -8548,8 +8352,8 @@ void Calculatedbm()
 
   if (sum_db > 0)
   {
-    dbm = dbm_calibration + (float32_t)RF_attenuation + slope * log10f (sum_db) + cons - (float32_t)bands[band].RFgain * 1.5;
-    dbmhz = (float32_t)RF_attenuation +  - (float32_t)bands[band].RFgain * 1.5 + slope * log10f (sum_db) -  10 * log10f ((float32_t)(((int)Ubin - (int)Lbin) * bin_BW)) + cons;
+    dbm = dbm_calibration + (float32_t)RF_attenuation + slope * log10f (sum_db) + cons - (float32_t)qsd.bands[qsd.band].RFgain * 1.5;
+    dbmhz = (float32_t)RF_attenuation +  - (float32_t)qsd.bands[qsd.band].RFgain * 1.5 + slope * log10f (sum_db) -  10 * log10f ((float32_t)(((int)Ubin - (int)Lbin) * bin_BW)) + cons;
   }
   else
   {
@@ -8739,19 +8543,19 @@ void EEPROM_LOAD() {
   } E;
 
   eeprom_read_block(&E, 0, sizeof(E));
-  calibration_factor = E.calibration_factor;
-  calibration_constant = E.calibration_constant;
+  qsd.calibration_factor = E.calibration_factor;
+  qsd.calibration_constant = E.calibration_constant;
   for (int i = 0; i < (NUM_BANDS); i++)
-    bands[i].freq = E.freq[i];
+    qsd.bands[i].freq = E.freq[i];
   for (int i = 0; i < (NUM_BANDS); i++)
-    bands[i].mode = E.mode[i];
+    qsd.bands[i].mode = E.mode[i];
   for (int i = 0; i < (NUM_BANDS); i++)
-    bands[i].FHiCut = E.bwu[i];
+    qsd.bands[i].FHiCut = E.bwu[i];
   for (int i = 0; i < (NUM_BANDS); i++)
-    bands[i].FLoCut = E.bwl[i];
+    qsd.bands[i].FLoCut = E.bwl[i];
   for (int i = 0; i < (NUM_BANDS); i++)
-    bands[i].RFgain = E.rfg[i];
-  band = E.band;
+    qsd.bands[i].RFgain = E.rfg[i];
+  qsd.band = E.band;
   //I_help = E.I_ampl;
   //Q_in_I_help = E.Q_in_I;
   //I_in_Q_help = E.I_in_Q;
@@ -8763,7 +8567,7 @@ void EEPROM_LOAD() {
   omegaN = E.omegaN;
   zeta_help = E.zeta_help;
   zeta = (float32_t) zeta_help / 100.0;
-  SAMPLE_RATE = E.rate;
+  qsd.audioADC.SAMPLE_RATE = E.rate;
   bass = E.bass;
   treble = E.treble;
   agc_thresh = E.agc_thresh;
@@ -8826,19 +8630,19 @@ void EEPROM_SAVE() {
     float32_t NR_beta;
   } E;
 
-  E.calibration_factor = calibration_factor;
-  E.band = band;
-  E.calibration_constant = calibration_constant;
+  E.calibration_factor = qsd.calibration_factor;
+  E.band = qsd.band;
+  E.calibration_constant = qsd.calibration_constant;
   for (int i = 0; i < (NUM_BANDS); i++)
-    E.freq[i] = bands[i].freq;
+    E.freq[i] = qsd.bands[i].freq;
   for (int i = 0; i < (NUM_BANDS); i++)
-    E.mode[i] = bands[i].mode;
+    E.mode[i] = qsd.bands[i].mode;
   for (int i = 0; i < (NUM_BANDS); i++)
-    E.bwu[i] = bands[i].FHiCut;
+    E.bwu[i] = qsd.bands[i].FHiCut;
   for (int i = 0; i < (NUM_BANDS); i++)
-    E.bwl[i] = bands[i].FLoCut;
+    E.bwl[i] = qsd.bands[i].FLoCut;
   for (int i = 0; i < (NUM_BANDS); i++)
-    E.rfg[i] = bands[i].RFgain;
+    E.rfg[i] = qsd.bands[i].RFgain;
   //      E.I_ampl = I_help;
   //      E.Q_in_I = Q_in_I_help;
   //      E.I_in_Q = I_in_Q_help;
@@ -8850,7 +8654,7 @@ void EEPROM_SAVE() {
   E.pll_fmax = pll_fmax;
   E.omegaN = omegaN;
   E.zeta_help = zeta_help;
-  E.rate = SAMPLE_RATE;
+  E.rate = qsd.audioADC.SAMPLE_RATE;
   E.bass = bass;
   E.treble = treble;
   E.agc_thresh = agc_thresh;
@@ -8921,7 +8725,7 @@ void reset_codec ()
   delay(10);
   sgtl5000_1.inputSelect(myInput);
   sgtl5000_1.adcHighPassFilterDisable(); // does not help too much!
-  sgtl5000_1.lineInLevel(bands[band].RFgain);
+  sgtl5000_1.lineInLevel(qsd.bands[qsd.band].RFgain);
   sgtl5000_1.lineOutLevel(24);
   sgtl5000_1.audioPostProcessorEnable(); // enables the DAP chain of the codec post audio processing before the headphone out
   sgtl5000_1.eqSelect (3); // Tone Control
@@ -8974,7 +8778,7 @@ void show_analog_gain()
   char string[16];
   const uint16_t col = ILI9341_GREEN;
   // automatic RF gain indicated by different colors??
-  if ((((bands[band].RFgain != RF_gain_old) || (RF_attenuation != RF_att_old)) && twinpeaks_tested == 1) || write_analog_gain)
+  if ((((qsd.bands[qsd.band].RFgain != RF_gain_old) || (RF_attenuation != RF_att_old)) && twinpeaks_tested == 1) || write_analog_gain)
   {
     tft.setCursor(pos_x_time - 40, pos_y_time + 26);
     tft.setFont(Arial_8);
@@ -8983,7 +8787,7 @@ void show_analog_gain()
     tft.print(string);
     tft.setCursor(pos_x_time - 40, pos_y_time + 26);
     tft.setTextColor(col);
-    sprintf(string, "%02.1fdB -", (float)(bands[band].RFgain * 1.5));
+    sprintf(string, "%02.1fdB -", (float)(qsd.bands[qsd.band].RFgain * 1.5));
     tft.print(string);
     //tft.print(" - ");
     tft.setCursor(pos_x_time, pos_y_time + 26);
@@ -9002,9 +8806,9 @@ void show_analog_gain()
     tft.print(string);
     tft.setCursor(pos_x_time + 40, pos_y_time + 24);
     tft.setTextColor(ILI9341_WHITE);
-    sprintf(string, "%02.1fdB", (float)(bands[band].RFgain * 1.5) - (float)RF_attenuation);
+    sprintf(string, "%02.1fdB", (float)(qsd.bands[qsd.band].RFgain * 1.5) - (float)RF_attenuation);
     tft.print(string);
-    RF_gain_old = bands[band].RFgain;
+    RF_gain_old = qsd.bands[qsd.band].RFgain;
     RF_att_old = RF_attenuation;
     write_analog_gain = 0;
   }
@@ -9012,10 +8816,10 @@ void show_analog_gain()
 
 void calc_notch_bins()
 {
-  float32_t spectrum_span = SR[SAMPLE_RATE].rate / 1000.0 / (float32_t)(1 << spectrum_zoom);
+  float32_t spectrum_span = qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / 1000.0 / (float32_t)(1 << spectrum_zoom);
   const uint16_t sp_width = 256;
   float32_t magni = sp_width / spectrum_span;
-  bin_BW = 0.0001220703125 * SR[SAMPLE_RATE].rate; // 1/8192 * sample rate --> 1024 point FFT AND decimation-by-8 = 8192
+  bin_BW = 0.0001220703125 * qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate; // 1/8192 * sample rate --> 1024 point FFT AND decimation-by-8 = 8192
   // calculate notch centre bin for FFT1024
   bin = notches[0] / bin_BW;
   // calculate bins (* 2) for deletion of bins in the iFFT_buffer
@@ -9051,7 +8855,7 @@ void show_notch(int notchF, int MODE) {
   tft.fillRect(notch_pixel_L[0] - 1, spectrum_y + 3, notch_pixel_R[0] - notch_pixel_L[0] + 2, spectrum_height - 3, ILI9341_BLACK);
 
   calc_notch_bins();
-  float32_t spectrum_span = SR[SAMPLE_RATE].rate / 1000.0 / (float32_t)(1 << spectrum_zoom);
+  float32_t spectrum_span = qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / 1000.0 / (float32_t)(1 << spectrum_zoom);
   pos_centre_f += spectrum_x + 65; // = pos_centre_f + 1;
   const uint16_t sp_width = 256;
   float32_t magni = sp_width / spectrum_span;
@@ -9473,48 +9277,48 @@ void alt_noise_blanking(float* insamp, int Nsam, float* E )
 
 void control_filter_f() {
   // low Fcut must never be larger than high Fcut and vice versa
-  if (band[bands].FHiCut < band[bands].FLoCut) band[bands].FHiCut = band[bands].FLoCut;
-  if (band[bands].FLoCut > band[bands].FHiCut) band[bands].FLoCut = band[bands].FHiCut;
+  if (qsd.band[qsd.bands].FHiCut < qsd.band[qsd.bands].FLoCut) qsd.band[qsd.bands].FHiCut = qsd.band[qsd.bands].FLoCut;
+  if (qsd.band[qsd.bands].FLoCut > qsd.band[qsd.bands].FHiCut) qsd.band[qsd.bands].FLoCut = qsd.band[qsd.bands].FHiCut;
   // calculate maximum possible FHiCut
-  float32_t sam = (SR[SAMPLE_RATE].rate / (DF * 2.0)) - 100.0;
+  float32_t sam = (qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / (DF * 2.0)) - 100.0;
   // clamp FHicut and Flowcut to max / min values
-  if (band[bands].FHiCut > (int)(sam))
+  if (qsd.band[qsd.bands].FHiCut > (int)(sam))
   {
-    band[bands].FHiCut = (int)sam;
+    qsd.band[qsd.bands].FHiCut = (int)sam;
   }
-  else if (band[bands].FHiCut < -(int)(sam - 100.0))
+  else if (qsd.band[qsd.bands].FHiCut < -(int)(sam - 100.0))
   {
-    band[bands].FHiCut = -(int)(sam - 100.0);
+    qsd.band[qsd.bands].FHiCut = -(int)(sam - 100.0);
   }
   
-  if (band[bands].FLoCut > (int)(sam - 100.0))
+  if (qsd.band[qsd.bands].FLoCut > (int)(sam - 100.0))
   {
-    band[bands].FLoCut = (int)(sam - 100.0);
+    qsd.band[qsd.bands].FLoCut = (int)(sam - 100.0);
   }
-  else if (band[bands].FLoCut < -(int)(sam))
+  else if (qsd.band[qsd.bands].FLoCut < -(int)(sam))
   {
-    band[bands].FLoCut = -(int)(sam);
+    qsd.band[qsd.bands].FLoCut = -(int)(sam);
   }
 
-  switch (bands[band].mode)
+  switch (qsd.bands[qsd.band].mode)
   {
     case DEMOD_SAM_LSB:
     case DEMOD_SAM_USB:
     case DEMOD_SAM_STEREO:
     case DEMOD_IQ:
-      bands[band].FLoCut = - bands[band].FHiCut;
+      qsd.bands[qsd.band].FLoCut = - qsd.bands[qsd.band].FHiCut;
       break;
     case DEMOD_LSB:
-      if (band[bands].FHiCut > 0) band[bands].FHiCut = 0;
+      if (qsd.band[qsd.bands].FHiCut > 0) qsd.band[qsd.bands].FHiCut = 0;
       break;
     case DEMOD_USB:
-      if (band[bands].FLoCut < 0) band[bands].FLoCut = 0;
+      if (qsd.band[qsd.bands].FLoCut < 0) qsd.band[qsd.bands].FLoCut = 0;
       break;
     case DEMOD_AM2:
     case DEMOD_AM_ME2:
     case DEMOD_SAM:
-      if (band[bands].FLoCut > -100) band[bands].FLoCut = -100;
-      if (band[bands].FHiCut < 100) band[bands].FHiCut = 100;
+      if (qsd.band[qsd.bands].FLoCut > -100) qsd.band[qsd.bands].FLoCut = -100;
+      if (qsd.band[qsd.bands].FHiCut < 100) qsd.band[qsd.bands].FHiCut = 100;
       break;
   }
 }
@@ -9531,22 +9335,22 @@ void set_dec_int_filters()
   // new !
   // set decimation and interpolation filter BW according to the desired filter frequencies
   // determine largest bandwidth from FHiCut and FLoCut
-  int filter_BW_highest = bands[band].FHiCut;
-  if (filter_BW_highest < - bands[band].FLoCut) 
+  int filter_BW_highest = qsd.bands[qsd.band].FHiCut;
+  if (filter_BW_highest < - qsd.bands[qsd.band].FLoCut) 
   {
-    filter_BW_highest = - bands[band].FLoCut;
+    filter_BW_highest = - qsd.bands[qsd.band].FLoCut;
   }
   LP_F_help = filter_BW_highest;
   
   if (LP_F_help > 10000) LP_F_help = 10000;
             Serial.print("Alias frequ for decimation/interpolation");Serial.println((LP_F_help));
 
-  calc_FIR_coeffs (FIR_dec1_coeffs, n_dec1_taps, (float32_t)(LP_F_help), n_att, 0, 0.0, (float32_t)(SR[SAMPLE_RATE].rate));
-  calc_FIR_coeffs (FIR_dec2_coeffs, n_dec2_taps, (float32_t)(LP_F_help), n_att, 0, 0.0, (float32_t)(SR[SAMPLE_RATE].rate / DF1));
+  calc_FIR_coeffs (FIR_dec1_coeffs, n_dec1_taps, (float32_t)(LP_F_help), n_att, 0, 0.0, (float32_t)(qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate));
+  calc_FIR_coeffs (FIR_dec2_coeffs, n_dec2_taps, (float32_t)(LP_F_help), n_att, 0, 0.0, (float32_t)(qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / DF1));
 
-  calc_FIR_coeffs (FIR_int1_coeffs, 48, (float32_t)(LP_F_help), n_att, 0, 0.0, (float32_t)(SR[SAMPLE_RATE].rate / DF1));
-  calc_FIR_coeffs (FIR_int2_coeffs, 32, (float32_t)(LP_F_help), n_att, 0, 0.0, (float32_t)SR[SAMPLE_RATE].rate);
-  bin_BW = 1.0 / (DF * FFT_length) * (float32_t)SR[SAMPLE_RATE].rate;
+  calc_FIR_coeffs (FIR_int1_coeffs, 48, (float32_t)(LP_F_help), n_att, 0, 0.0, (float32_t)(qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate / DF1));
+  calc_FIR_coeffs (FIR_int2_coeffs, 32, (float32_t)(LP_F_help), n_att, 0, 0.0, (float32_t)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate);
+  bin_BW = 1.0 / (DF * FFT_length) * (float32_t)qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate;
 }
 
 void spectral_noise_reduction_init()
@@ -9837,27 +9641,27 @@ void spectral_noise_reduction (void)
           float32_t ph1y[NR_FFT_L/2];
           static int NR_first_time_2 = 1;
 
-          if(bands[band].FLoCut <= 0 && bands[band].FHiCut >= 0)
+          if(qsd.bands[qsd.band].FLoCut <= 0 && qsd.bands[qsd.band].FHiCut >= 0)
           {
             lf_freq = 0.0;
-            uf_freq = fmax(-(float32_t)bands[band].FLoCut, (float32_t)bands[band].FHiCut);
+            uf_freq = fmax(-(float32_t)qsd.bands[qsd.band].FLoCut, (float32_t)qsd.bands[qsd.band].FHiCut);
           }
           else
           {
-            if(bands[band].FLoCut > 0)
+            if(qsd.bands[qsd.band].FLoCut > 0)
             {
-              lf_freq = (float32_t)bands[band].FLoCut;
-              uf_freq = (float32_t)bands[band].FHiCut;
+              lf_freq = (float32_t)qsd.bands[qsd.band].FLoCut;
+              uf_freq = (float32_t)qsd.bands[qsd.band].FHiCut;
             }
             else
             {
-                uf_freq = -(float32_t)bands[band].FLoCut;
-                lf_freq = -(float32_t)bands[band].FHiCut;
+                uf_freq = -(float32_t)qsd.bands[qsd.band].FLoCut;
+                lf_freq = -(float32_t)qsd.bands[qsd.band].FHiCut;
             }
           }
           // / rate DF SR[SAMPLE_RATE].rate/DF
-          lf_freq /= ((SR[SAMPLE_RATE].rate/DF) / NR_FFT_L); // bin BW is 46.9Hz [12000Hz / 256 bins] @96kHz
-          uf_freq /= ((SR[SAMPLE_RATE].rate/DF) / NR_FFT_L);
+          lf_freq /= ((qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate/DF) / NR_FFT_L); // bin BW is 46.9Hz [12000Hz / 256 bins] @96kHz
+          uf_freq /= ((qsd.audioADC.SR[qsd.audioADC.SAMPLE_RATE].rate/DF) / NR_FFT_L);
 
           // Frank DD4WH & Michael DL2FW, November 2017
           // NOISE REDUCTION BASED ON SPECTRAL SUBTRACTION
