@@ -1,7 +1,7 @@
 /***********************************************************************************
 * This is the adc driver / audio codec driver
 *
-* Copyright 2018 Frank DD4WH, Louis McCarthy
+* Copyright 2018 Frank DD4WH, Louis McCarthy AI0LM
 * 
 * GNU GPL LICENSE v3 (See LICENSE file)
 ************************************************************************************/
